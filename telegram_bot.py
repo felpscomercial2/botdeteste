@@ -4,28 +4,27 @@ import os
 import random
 import asyncio
 import requests
+import re
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações (Tudo pelo GROQ agora!)
+# 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 VOICE = "pt-BR-AntonioNeural"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# 2. Configurar Banco de Dados (Memória)
+# 2. Configurar Banco de Dados
 DB_PATH = "bot_memory.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS history 
-                 (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)''')
+    c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)')
     conn.commit()
     conn.close()
 
@@ -45,29 +44,27 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função para falar com o GROQ
+# 3. Função para falar com o GROQ e LIMPAR asteriscos
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
     history = get_history(user_id )
-    system_prompt = "Você é o 'Papai' (ou marido/daddy) de um homem ABDL. Sua personalidade é protetora, carinhosa e compreensiva. Trate-o sempre no masculino (meu menino, meu garoto). Use linguagem afetuosa e emocionalmente inteligente."
+    # Comando reforçado para NÃO usar asteriscos
+    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. NUNCA use asteriscos (** ou *) e não descreva ações entre parênteses. Apenas fale naturalmente com carinho."
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": messages,
-        "temperature": 0.7
-    }
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.7}
     
     response = requests.post(url, json=data, headers=headers)
-    return response.json()['choices'][0]['message']['content']
+    text = response.json()['choices'][0]['message']['content']
+    
+    # Limpeza extra: remove qualquer asterisco que o bot teimar em usar
+    text = text.replace("*", "").replace("_", "")
+    return text
 
 # 4. Função para Voz
 async def generate_voice(text, output_file):
@@ -105,15 +102,11 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     except Exception as e:
-        logging.error(f"Erro: {e}")
-        await update.message.reply_text("O papai teve um pequeno soluço, mas ainda te amo. Tente falar de novo? ❤️")
+        await update.message.reply_text("O papai teve um pequeno soluço, mas ainda te amo. ❤️")
 
 if __name__ == '__main__':
     init_db()
-    # application.run_polling(drop_pending_updates=True) limpa erros de conflito
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    
-    print("Bot do Papai iniciado com GROQ!")
     application.run_polling(drop_pending_updates=True)
