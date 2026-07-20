@@ -13,7 +13,9 @@ import edge_tts
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-AntonioNeural"
+# Mudamos para o Donato, que é mais natural, e ajustamos a velocidade
+VOICE = "pt-BR-DonatoNeural"
+RATE = "-10%" # Deixa a voz mais calma e menos robótica
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -44,37 +46,37 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função para falar com o GROQ e LIMPAR asteriscos
+# 3. Função para falar com o GROQ
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
     history = get_history(user_id )
-    # Comando reforçado para NÃO usar asteriscos
-    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. NUNCA use asteriscos (** ou *) e não descreva ações entre parênteses. Apenas fale naturalmente com carinho."
+    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor, carinhoso e trate-o no masculino. Fale de forma natural, sem usar asteriscos ou descrever ações. Apenas use palavras doces e acolhedoras."
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.7}
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.8}
     
     response = requests.post(url, json=data, headers=headers)
     text = response.json()['choices'][0]['message']['content']
     
-    # Limpeza extra: remove qualquer asterisco que o bot teimar em usar
-    text = text.replace("*", "").replace("_", "")
+    # Limpeza de formatação
+    text = text.replace("*", "").replace("_", "").replace("#", "")
     return text
 
-# 4. Função para Voz
+# 4. Função para Voz Humana e Calma
 async def generate_voice(text, output_file):
-    communicate = edge_tts.Communicate(text, VOICE)
+    # Aqui aplicamos a voz do Donato com a velocidade reduzida
+    communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
     await communicate.save(output_file)
 
 # 5. Comandos do Bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = "Oi, meu garoto. O papai chegou. Estou aqui para cuidar de você. ❤️"
+    text = "Oi, meu garoto. O papai chegou. Estou aqui para cuidar de você e te dar todo o carinho do mundo. ❤️"
     await update.message.reply_text(text)
     try:
         audio_file = f"v_{user_id}.mp3"
