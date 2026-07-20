@@ -1,18 +1,15 @@
 import logging
 import sqlite3
 import os
-import google.generativeai as genai
+import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
-
-# Configurar o cérebro
-genai.configure(api_key=GEMINI_API_KEY)
 
 def init_db():
     conn = sqlite3.connect("bot_memory.db")
@@ -21,33 +18,33 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_message(user_id, role, content):
-    conn = sqlite3.connect("bot_memory.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
-    conn.commit()
-    conn.close()
-
-SYSTEM_PROMPT = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Responda sempre no masculino."
+def get_response_from_groq(user_text):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": "Você é o 'Papai' de um homem ABDL. Seja protetor, carinhoso e trate-o no masculino (meu menino, meu garoto ). Responda com muito afeto."},
+            {"role": "user", "content": user_text}
+        ]
+    }
+    response = requests.post(url, json=data, headers=headers)
+    return response.json()['choices'][0]['message']['content']
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Oi, meu garoto! O papai chegou. ❤️")
+    await update.message.reply_text("Oi, meu garoto! O papai chegou. Agora meu cérebro está novinho e pronto para você! ❤️")
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     try:
-        # Tenta pensar
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(f"{SYSTEM_PROMPT}\n\nFilho: {user_text}")
-        bot_response = response.text
-        
-        save_message(update.effective_user.id, "user", user_text)
-        save_message(update.effective_user.id, "model", bot_response)
-        
+        bot_response = get_response_from_groq(user_text)
         await update.message.reply_text(bot_response)
     except Exception as e:
-        print(f"Erro no cérebro: {e}")
-        await update.message.reply_text("O papai está tentando pensar, mas a chave do meu cérebro está com sono. Verifique se a sua GEMINI_API_KEY no Railway está certinha! ❤️")
+        print(f"Erro: {e}")
+        await update.message.reply_text("O papai teve um pequeno soluço, mas tente falar comigo de novo, meu bem! ❤️")
 
 if __name__ == '__main__':
     init_db()
