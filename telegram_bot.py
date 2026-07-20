@@ -4,8 +4,7 @@ import os
 import random
 import asyncio
 import requests
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
@@ -13,15 +12,13 @@ import edge_tts
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-# Mudamos para o Donato, que é mais natural, e ajustamos a velocidade
 VOICE = "pt-BR-DonatoNeural"
-RATE = "-10%" # Deixa a voz mais calma e menos robótica
+RATE = "-10%"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# 2. Configurar Banco de Dados
+# 2. Banco de Dados
 DB_PATH = "bot_memory.db"
-
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -46,65 +43,51 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função para falar com o GROQ
+# 3. Função GROQ
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    
     history = get_history(user_id )
-    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor, carinhoso e trate-o no masculino. Fale de forma natural, sem usar asteriscos ou descrever ações. Apenas use palavras doces e acolhedoras."
-    
+    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Fale naturalmente sem asteriscos."
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
-    
     data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.8}
-    
     response = requests.post(url, json=data, headers=headers)
     text = response.json()['choices'][0]['message']['content']
-    
-    # Limpeza de formatação
-    text = text.replace("*", "").replace("_", "").replace("#", "")
-    return text
+    return text.replace("*", "").replace("_", "")
 
-# 4. Função para Voz Humana e Calma
-async def generate_voice(text, output_file):
-    # Aqui aplicamos a voz do Donato com a velocidade reduzida
-    communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
-    await communicate.save(output_file)
-
-# 5. Comandos do Bot
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 4. Função de Voz Melhorada
+async def send_papai_voice(update, text):
     user_id = update.effective_user.id
-    text = "Oi, meu garoto. O papai chegou. Estou aqui para cuidar de você e te dar todo o carinho do mundo. ❤️"
-    await update.message.reply_text(text)
+    audio_file = f"v_{user_id}_{random.randint(1,1000)}.mp3"
     try:
-        audio_file = f"v_{user_id}.mp3"
-        await generate_voice(text, audio_file)
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
+        await communicate.save(audio_file)
         await update.message.reply_voice(voice=open(audio_file, 'rb'))
-        os.remove(audio_file)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Erro na voz: {e}")
+    finally:
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+
+# 5. Comandos
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "Oi, meu garoto. O papai chegou. ❤️"
+    await update.message.reply_text(text)
+    await send_papai_voice(update, text)
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
     save_message(user_id, "user", user_text)
-    
     try:
         bot_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
-        
-        try:
-            audio_file = f"v_{user_id}.mp3"
-            await generate_voice(bot_response, audio_file)
-            await update.message.reply_voice(voice=open(audio_file, 'rb'))
-            os.remove(audio_file)
-        except:
-            pass
+        await send_papai_voice(update, bot_response)
     except Exception as e:
-        await update.message.reply_text("O papai teve um pequeno soluço, mas ainda te amo. ❤️")
+        await update.message.reply_text("O papai teve um soluço, mas te amo. ❤️")
 
 if __name__ == '__main__':
     init_db()
