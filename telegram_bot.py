@@ -4,7 +4,7 @@ import os
 import random
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
@@ -43,39 +43,64 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
+def get_all_users():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    return [row[0] for row in c.fetchall()]
+
 # 3. Função GROQ
-def get_groq_response(user_id, user_text):
+def get_groq_response(user_id, user_text, is_proactive=False):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
-    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Fale naturalmente sem asteriscos."
+    
+    if is_proactive:
+        system_prompt = "Você é o 'Papai' de um homem ABDL. Inicie uma conversa curta e carinhosa. Pergunte como ele está ou diga que estava pensando nele. Seja protetor. Trate-o no masculino. Sem asteriscos."
+        user_input = "Papai, me mande um carinho surpresa."
+    else:
+        system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
+        user_input = user_text
+
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": user_input})
+    
     data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.8}
     response = requests.post(url, json=data, headers=headers)
-    text = response.json()['choices'][0]['message']['content']
-    return text.replace("*", "").replace("_", "")
+    return response.json()['choices'][0]['message']['content'].replace("*", "").replace("_", "")
 
-# 4. Função de Voz Melhorada
-async def send_papai_voice(update, text):
-    user_id = update.effective_user.id
-    audio_file = f"v_{user_id}_{random.randint(1,1000)}.mp3"
+# 4. Função de Voz
+async def send_papai_voice(bot, chat_id, text):
+    audio_file = f"v_{chat_id}_{random.randint(1,1000)}.mp3"
     try:
         communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
         await communicate.save(audio_file)
-        await update.message.reply_voice(voice=open(audio_file, 'rb'))
+        await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
     finally:
         if os.path.exists(audio_file):
             os.remove(audio_file)
 
-# 5. Comandos
+# 5. Mensagens Proativas (O bot fala sozinho)
+async def proactive_check(context: ContextTypes.DEFAULT_TYPE):
+    users = get_all_users()
+    for user_id in users:
+        if random.random() < 0.3: # 30% de chance de falar
+            try:
+                bot_response = get_groq_response(user_id, "", is_proactive=True)
+                save_message(user_id, "model", bot_response)
+                await context.bot.send_message(chat_id=user_id, text=bot_response)
+                await send_papai_voice(context.bot, user_id, bot_response)
+            except Exception as e:
+                logging.error(f"Erro proativo: {e}")
+
+# 6. Comandos
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "Oi, meu garoto. O papai chegou. ❤️"
     await update.message.reply_text(text)
-    await send_papai_voice(update, text)
+    await send_papai_voice(context.bot, update.effective_user.id, text)
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -85,7 +110,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
-        await send_papai_voice(update, bot_response)
+        await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         await update.message.reply_text("O papai teve um soluço, mas te amo. ❤️")
 
@@ -94,4 +119,9 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    
+    # Agendar as mensagens surpresa a cada 4 horas
+    job_queue = application.job_queue
+    job_queue.run_repeating(proactive_check, interval=timedelta(hours=4), first=timedelta(seconds=10))
+    
     application.run_polling(drop_pending_updates=True)
