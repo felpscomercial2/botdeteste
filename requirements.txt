@@ -1,4 +1,0 @@
-python-telegram-bot[job-queue]
-google-generativeai
-edge-tts
-asyncio
