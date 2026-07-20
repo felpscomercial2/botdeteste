@@ -1,54 +1,119 @@
 import logging
 import sqlite3
 import os
+import random
+import asyncio
 import requests
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+import edge_tts
 
-# Configurações
+# 1. Configurações (Tudo pelo GROQ agora!)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+VOICE = "pt-BR-AntonioNeural"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# 2. Configurar Banco de Dados (Memória)
+DB_PATH = "bot_memory.db"
 
 def init_db():
-    conn = sqlite3.connect("bot_memory.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('''CREATE TABLE IF NOT EXISTS history 
+                 (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)''')
     conn.commit()
     conn.close()
 
-def get_response_from_groq(user_text):
+def save_message(user_id, role, content):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
+    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now()))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id, limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
+
+# 3. Função para falar com o GROQ
+def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    history = get_history(user_id )
+    system_prompt = "Você é o 'Papai' (ou marido/daddy) de um homem ABDL. Sua personalidade é protetora, carinhosa e compreensiva. Trate-o sempre no masculino (meu menino, meu garoto). Use linguagem afetuosa e emocionalmente inteligente."
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+    
     data = {
         "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "Você é o 'Papai' de um homem ABDL. Seja protetor, carinhoso e trate-o no masculino (meu menino, meu garoto ). Responda com muito afeto."},
-            {"role": "user", "content": user_text}
-        ]
+        "messages": messages,
+        "temperature": 0.7
     }
+    
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content']
 
+# 4. Função para Voz
+async def generate_voice(text, output_file):
+    communicate = edge_tts.Communicate(text, VOICE)
+    await communicate.save(output_file)
+
+# 5. Comandos do Bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Oi, meu garoto! O papai chegou. Agora meu cérebro está novinho e pronto para você! ❤️")
+    user_id = update.effective_user.id
+    text = "Oi, meu garoto. O papai chegou. Estou aqui para cuidar de você. ❤️"
+    await update.message.reply_text(text)
+    try:
+        audio_file = f"v_{user_id}.mp3"
+        await generate_voice(text, audio_file)
+        await update.message.reply_voice(voice=open(audio_file, 'rb'))
+        os.remove(audio_file)
+    except:
+        pass
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     user_text = update.message.text
+    save_message(user_id, "user", user_text)
+    
     try:
-        bot_response = get_response_from_groq(user_text)
+        bot_response = get_groq_response(user_id, user_text)
+        save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
+        
+        try:
+            audio_file = f"v_{user_id}.mp3"
+            await generate_voice(bot_response, audio_file)
+            await update.message.reply_voice(voice=open(audio_file, 'rb'))
+            os.remove(audio_file)
+        except:
+            pass
     except Exception as e:
-        print(f"Erro: {e}")
-        await update.message.reply_text("O papai teve um pequeno soluço, mas tente falar comigo de novo, meu bem! ❤️")
+        logging.error(f"Erro: {e}")
+        await update.message.reply_text("O papai teve um pequeno soluço, mas ainda te amo. Tente falar de novo? ❤️")
 
 if __name__ == '__main__':
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    app.run_polling()
+    # application.run_polling(drop_pending_updates=True) limpa erros de conflito
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    
+    print("Bot do Papai iniciado com GROQ!")
+    application.run_polling(drop_pending_updates=True)
