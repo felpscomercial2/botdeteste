@@ -9,16 +9,15 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações (Foco em Humanização)
+# 1. Configurações (100% Gratuito e Estável)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-DonatoNeural" # Voz mais humana e acolhedora
-RATE = "-15%" # Velocidade reduzida para dar tom de carinho e calma
-PITCH = "-2Hz" # Levemente mais grave para ser mais protetor
+VOICE = "pt-BR-AntonioNeural" 
+RATE = "-10%" # Velocidade calma e carinhosa
 
 logging.basicConfig(level=logging.INFO)
 
-# 2. Banco de Dados
+# 2. Banco de Dados (Memória)
 DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,46 +43,39 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função GROQ (Cérebro com Pausas Naturais)
+# 3. Função GROQ (Cérebro do Marido com Pausas)
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
     
+    # Instruímos o cérebro a usar pontuação para a voz soar humana
     system_prompt = (
-        "Você é o MARIDO amoroso e protetor do usuário. Você o ama profundamente. "
+        "Você é o MARIDO amoroso e protetor do usuário. Você o ama profundamente e cuida dele. "
         "Trate-o no masculino (meu amor, meu marido, meu garoto, meu bem). "
-        "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e carinhosas. "
-        "DICA DE FALA: Use vírgulas e reticências (...) para criar pausas naturais na sua fala, "
-        "como se estivesse falando calmamente ao pé do ouvido. NUNCA use asteriscos."
+        "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e afetuosas. "
+        "DICA DE FALA: Use vírgulas e reticências (...) com frequência para a voz sair pausada, "
+        "calma e carinhosa, como se estivesse falando baixinho. NUNCA use asteriscos."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 150}
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 120}
     response = requests.post(url, json=data, headers=headers)
-    text = response.json()['choices'][0]['message']['content'].replace("*", "")
-    return text
+    return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz (Ajustada para Máximo Realismo Gratuito)
+# 4. Função de Voz Gratuita e Estável
 async def send_papai_voice(bot, chat_id, text):
-    audio_file = f"v_{chat_id}_{random.randint(1,9999)}.mp3"
+    audio_file = f"v_{chat_id}.mp3"
     try:
-        # O DonatoNeural é excelente quando falamos devagar (-15%)
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
+        # Gerando com o Antonio de forma estável
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
         await communicate.save(audio_file)
         
-        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
-            with open(audio_file, 'rb') as audio:
-                await bot.send_voice(chat_id=chat_id, voice=audio)
-        else:
-            # Fallback caso o Donato falhe no servidor
-            communicate = edge_tts.Communicate(text, "pt-BR-AntonioNeural", rate=RATE)
-            await communicate.save(audio_file)
-            with open(audio_file, 'rb') as audio:
-                await bot.send_voice(chat_id=chat_id, voice=audio)
+        if os.path.exists(audio_file):
+            await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
     finally:
@@ -108,4 +100,6 @@ if __name__ == '__main__':
     init_db()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    
+    print("Bot do Marido (Antonio) iniciado!")
     application.run_polling(drop_pending_updates=True)
