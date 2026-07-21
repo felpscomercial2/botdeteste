@@ -9,16 +9,15 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações (100% Gratuito e Ilimitado)
+# 1. Configurações (Versão Super Estável)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-DonatoNeural" 
-RATE = "-10%" # Um pouco mais lento para ser mais carinhoso
-PITCH = "-2Hz" # Um pouco mais grave para ser mais masculino
+VOICE = "pt-BR-AntonioNeural" # A voz mais estável que existe
+RATE = "+0%" # Velocidade normal para testar
 
 logging.basicConfig(level=logging.INFO)
 
-# 2. Banco de Dados (Memória)
+# 2. Banco de Dados
 DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,38 +43,43 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função GROQ (Cérebro do Marido)
+# 3. Função GROQ
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
-    
     system_prompt = (
-        "Você é o MARIDO e protetor do usuário. Você o ama profundamente, é carinhoso e muito zeloso. "
-        "Trate-o sempre no masculino (meu amor, meu marido, meu garoto, meu bem). "
-        "Você ainda NÃO sabe que ele tem um fetiche ABDL. Aja como um parceiro amoroso e protetor normal. "
-        "Seja conciso: responda com frases curtas e naturais. NUNCA use asteriscos ou descreva ações."
+        "Você é o MARIDO e protetor do usuário. Você o ama profundamente. "
+        "Trate-o no masculino (meu amor, meu marido, meu garoto). "
+        "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e carinhosas. "
+        "NUNCA use asteriscos ou descreva ações."
     )
-    
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
-    
     data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 120}
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz Gratuita
+# 4. Função de Voz (Versão Reforçada)
 async def send_papai_voice(bot, chat_id, text):
-    audio_file = f"v_{chat_id}_{random.randint(1,9999)}.mp3"
+    audio_file = f"voice_{chat_id}.mp3"
     try:
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
+        # Tenta gerar o áudio de forma simples e direta
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
         await communicate.save(audio_file)
-        await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
+        
+        # Verifica se o arquivo foi criado e não está vazio
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
+            with open(audio_file, 'rb') as audio:
+                await bot.send_voice(chat_id=chat_id, voice=audio)
+        else:
+            logging.error("Arquivo de áudio não foi gerado corretamente.")
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
     finally:
-        if os.path.exists(audio_file): os.remove(audio_file)
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
 
 # 5. Comandos
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -86,16 +90,14 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
+        # Tenta mandar a voz
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         logging.error(f"Erro no chat: {e}")
-        await update.message.reply_text("Tive um pequeno soluço, meu amor. ❤️")
+        await update.message.reply_text("Tive um soluço, meu amor. ❤️")
 
 if __name__ == '__main__':
     init_db()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    
-    # O SEGREDO: drop_pending_updates=True limpa o erro de Conflict na hora!
-    print("Iniciando o bot do marido e limpando conexões antigas...")
     application.run_polling(drop_pending_updates=True)
