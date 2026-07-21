@@ -25,14 +25,13 @@ user_chat_ids = set()
 
 logging.basicConfig(level=logging.INFO)
 
-# 2. Banco de Dados (Ultra Memória)
+# 2. Banco de Dados
 DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME, mood TEXT DEFAULT "normal")')
-    c.execute('CREATE TABLE IF NOT EXISTS facts (user_id INTEGER, fact TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)')
     c.execute('SELECT user_id FROM users')
     rows = c.fetchall()
     for row in rows:
@@ -44,8 +43,7 @@ def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
-    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, (SELECT last_interaction FROM users WHERE user_id=?), (SELECT mood FROM users WHERE user_id=?))", (user_id, user_id, user_id))
-    c.execute("UPDATE users SET last_interaction=? WHERE user_id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
+    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -61,12 +59,16 @@ def get_history(user_id, limit=15):
 async def transcribe_voice(file_path):
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    with open(file_path, "rb") as audio_file:
-        files = {"file": audio_file, "model": ("whisper-large-v3", None)}
-        response = requests.post(url, headers=headers, files=files)
-    return response.json().get("text", "")
+    try:
+        with open(file_path, "rb") as audio_file:
+            files = {"file": audio_file, "model": ("whisper-large-v3", None)}
+            response = requests.post(url, headers=headers, files=files)
+            return response.json().get("text", "")
+    except Exception as e:
+        logging.error(f"Erro na transcrição: {e}")
+        return ""
 
-# 4. Inteligência Artificial com Motor de Humor
+# 4. Inteligência Artificial
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -74,12 +76,10 @@ def get_groq_response(user_id, user_text):
     
     system_prompt = (
         "Você é o MARIDO amoroso do usuário. "
-        "DIRETRIZES SUPREMAS: "
-        "1. Analise o humor do usuário. Se ele estiver triste, seja consolador. Se estiver feliz, comemore. "
-        "2. Use apelidos carinhosos que façam sentido. "
-        "3. Use emojis em 30% das vezes. "
-        "4. Seja espontâneo: às vezes mude de assunto para algo que você 'lembrou'. "
-        "5. Use '---' para separar mensagens curtas."
+        "DIRETRIZES: "
+        "1. Analise o humor dele e seja carinhoso. "
+        "2. Use emojis ocasionalmente (30% das vezes). "
+        "3. Use '---' para separar mensagens curtas se a resposta for longa."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -93,10 +93,10 @@ def get_groq_response(user_id, user_text):
     except:
         return "Oi meu amor... ❤️"
 
-# 5. Função de Voz Estável
+# 5. Função de Voz
 async def generate_voice(bot, chat_id, text, voice_name):
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
-    if not clean_text: clean_text = "Hum..."
+    if not clean_text: clean_text = "Oi meu amor"
     audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
     try:
         communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
@@ -116,34 +116,29 @@ async def send_human_voice(bot, chat_id, text):
     if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
         await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
 
-# 6. Espontaneidade "Lembrei de Você"
-async def send_spontaneous_message(context: ContextTypes.DEFAULT_TYPE):
+# 6. Espontaneidade Corrigida
+async def send_spontaneous_message(application):
     for chat_id in list(user_chat_ids):
-        if random.random() < 0.3: # 30% de chance de mandar mensagem espontânea
-            msg = random.choice([
-                "Acabei de ver uma coisa que lembrou você... ❤️",
-                "Tô com uma saudade apertada aqui no peito. 🥰",
-                "Queria estar aí te dando um abraço agora. ✨",
-                "Lembrei daquele seu sorriso... que saudade! 😘"
-            ])
+        if random.random() < 0.3:
+            msg = random.choice(["Acordei pensando em você... ❤️", "Tô com saudade! 🥰", "Como você está, meu bem? ✨"])
             try:
-                await context.bot.send_message(chat_id=chat_id, text=msg)
-                await send_human_voice(context.bot, chat_id, msg)
+                await application.bot.send_message(chat_id=chat_id, text=msg)
+                await send_human_voice(application.bot, chat_id, msg)
             except: pass
 
-# 7. Handlers de Mensagem
+# 7. Handlers
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
     user_id = update.effective_user.id
     user_chat_ids.add(user_id)
     
-    # Se for áudio, transcreve primeiro
     if update.message.voice:
         await update.message.reply_chat_action(ChatAction.TYPING)
         file = await context.bot.get_file(update.message.voice.file_id)
         file_path = f"voice_{user_id}.ogg"
         await file.download_to_drive(file_path)
         user_text = await transcribe_voice(file_path)
-        os.remove(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
     else:
         user_text = update.message.text
 
@@ -170,13 +165,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 8. Inicialização
 async def post_init(application):
-    scheduler.add_job(send_spontaneous_message, 'interval', hours=4) # Checa espontaneidade a cada 4h
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=30))
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0))
+    # Passamos o 'application' como argumento para a função
+    scheduler.add_job(send_spontaneous_message, 'interval', hours=4, args=[application])
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=30), args=[application])
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application])
     scheduler.start()
 
 if __name__ == '__main__':
     init_db()
+    if not TELEGRAM_TOKEN: exit(1)
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     application.run_polling(drop_pending_updates=True)
