@@ -2,20 +2,19 @@ import logging
 import sqlite3
 import os
 import random
+import asyncio
 import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from elevenlabs.client import ElevenLabs
+import edge_tts
 
-# 1. Configurações
+# 1. Configurações (100% Gratuito)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
-
-client_eleven = None
-if ELEVEN_API_KEY:
-    client_eleven = ElevenLabs(api_key=ELEVEN_API_KEY)
+VOICE = "pt-BR-DonatoNeural" # Voz masculina natural e gratuita
+RATE = "-5%" # Velocidade quase normal para não parecer robô
+PITCH = "-1Hz" # Tom levemente mais profundo
 
 logging.basicConfig(level=logging.INFO)
 
@@ -49,29 +48,26 @@ def get_history(user_id, limit=10):
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    history = get_history(user_id )
-    system_prompt = "Você é o Papai de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
+    history = get_history(user_id)
+    system_prompt = (
+        "Você é o MARIDO do usuário. Você o ama profundamente e é muito protetor. "
+        "Trate-o sempre no masculino (meu amor, meu marido, meu garoto). "
+        "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e carinhosas. "
+        "NUNCA use asteriscos ou descreva ações."
+    )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages}
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 120}
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz Real (Com o ID Secreto do Ethan)
+# 4. Função de Voz Gratuita Melhorada
 async def send_papai_voice(bot, chat_id, text):
-    if not client_eleven: return
     audio_file = f"v_{chat_id}.mp3"
     try:
-        # Usamos o ID direto do Ethan: g5CIj9v6E6S30pBNoXhX
-        audio = client_eleven.generate(
-            text=text,
-            voice="pNInz6obpgDQGcFmaJgB", # Este é o ID secreto do Ethan!
-            model="eleven_multilingual_v2"
-        )
-        with open(audio_file, "wb") as f:
-            for chunk in audio:
-                if chunk: f.write(chunk)
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
+        await communicate.save(audio_file)
         await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
@@ -90,7 +86,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         logging.error(f"Erro no chat: {e}")
-        await update.message.reply_text("O papai teve um soluço. ❤️")
+        await update.message.reply_text("Tive um pequeno soluço, meu amor. ❤️")
 
 if __name__ == '__main__':
     init_db()
