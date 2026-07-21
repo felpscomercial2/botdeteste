@@ -58,14 +58,15 @@ def get_groq_response(user_id, user_text):
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz Real (Ethan)
+# 4. Função de Voz Real (Com o ID Secreto do Ethan)
 async def send_papai_voice(bot, chat_id, text):
     if not client_eleven: return
     audio_file = f"v_{chat_id}.mp3"
     try:
+        # Usamos o ID direto do Ethan: g5CIj9v6E6S30pBNoXhX
         audio = client_eleven.generate(
             text=text,
-            voice="Ethan", 
+            voice="g5CIj9v6E6S30pBNoXhX", # Este é o ID secreto do Ethan!
             model="eleven_multilingual_v2"
         )
         with open(audio_file, "wb") as f:
@@ -95,7 +96,4 @@ if __name__ == '__main__':
     init_db()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    
-    # O SEGREDO: drop_pending_updates=True limpa o erro de Conflict na hora!
-    print("Iniciando o bot e limpando conexões antigas...")
     application.run_polling(drop_pending_updates=True)
