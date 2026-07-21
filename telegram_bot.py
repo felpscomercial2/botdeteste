@@ -9,11 +9,12 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações (Versão Super Estável)
+# 1. Configurações (Foco em Humanização)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-AntonioNeural" # A voz mais estável que existe
-RATE = "+0%" # Velocidade normal para testar
+VOICE = "pt-BR-DonatoNeural" # Voz mais humana e acolhedora
+RATE = "-15%" # Velocidade reduzida para dar tom de carinho e calma
+PITCH = "-2Hz" # Levemente mais grave para ser mais protetor
 
 logging.basicConfig(level=logging.INFO)
 
@@ -43,38 +44,46 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função GROQ
+# 3. Função GROQ (Cérebro com Pausas Naturais)
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
+    
     system_prompt = (
-        "Você é o MARIDO e protetor do usuário. Você o ama profundamente. "
-        "Trate-o no masculino (meu amor, meu marido, meu garoto). "
+        "Você é o MARIDO amoroso e protetor do usuário. Você o ama profundamente. "
+        "Trate-o no masculino (meu amor, meu marido, meu garoto, meu bem). "
         "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e carinhosas. "
-        "NUNCA use asteriscos ou descreva ações."
+        "DICA DE FALA: Use vírgulas e reticências (...) para criar pausas naturais na sua fala, "
+        "como se estivesse falando calmamente ao pé do ouvido. NUNCA use asteriscos."
     )
+    
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 120}
+    
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 150}
     response = requests.post(url, json=data, headers=headers)
-    return response.json()['choices'][0]['message']['content'].replace("*", "")
+    text = response.json()['choices'][0]['message']['content'].replace("*", "")
+    return text
 
-# 4. Função de Voz (Versão Reforçada)
+# 4. Função de Voz (Ajustada para Máximo Realismo Gratuito)
 async def send_papai_voice(bot, chat_id, text):
-    audio_file = f"voice_{chat_id}.mp3"
+    audio_file = f"v_{chat_id}_{random.randint(1,9999)}.mp3"
     try:
-        # Tenta gerar o áudio de forma simples e direta
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
+        # O DonatoNeural é excelente quando falamos devagar (-15%)
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
         await communicate.save(audio_file)
         
-        # Verifica se o arquivo foi criado e não está vazio
         if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
             with open(audio_file, 'rb') as audio:
                 await bot.send_voice(chat_id=chat_id, voice=audio)
         else:
-            logging.error("Arquivo de áudio não foi gerado corretamente.")
+            # Fallback caso o Donato falhe no servidor
+            communicate = edge_tts.Communicate(text, "pt-BR-AntonioNeural", rate=RATE)
+            await communicate.save(audio_file)
+            with open(audio_file, 'rb') as audio:
+                await bot.send_voice(chat_id=chat_id, voice=audio)
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
     finally:
@@ -90,7 +99,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
-        # Tenta mandar a voz
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         logging.error(f"Erro no chat: {e}")
