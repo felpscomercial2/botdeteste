@@ -66,7 +66,7 @@ async def send_papai_voice(bot, chat_id, text):
         # Usamos o ID direto do Ethan: g5CIj9v6E6S30pBNoXhX
         audio = client_eleven.generate(
             text=text,
-            voice="pNInz6obpgDQGcFmaJgB", # Este é o ID secreto do Ethan!
+            voice="JBFqnCBsd6RMkjVDRZzb", # Este é o ID secreto do Ethan!
             model="eleven_multilingual_v2"
         )
         with open(audio_file, "wb") as f:
