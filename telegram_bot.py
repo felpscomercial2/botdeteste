@@ -2,21 +2,21 @@ import logging
 import sqlite3
 import os
 import random
-import asyncio
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-import edge_tts
+from elevenlabs.client import ElevenLabs
 
-# 1. Configurações (Voz garantida!)
+# 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-AntonioNeural" # Voz masculina padrão que sempre funciona
-RATE = "-15%" # Mais lenta para ser mais carinhosa
-PITCH = "-5Hz" # Um pouquinho mais grave para ser mais masculina
+ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Iniciando o cérebro da voz
+client_eleven = ElevenLabs(api_key=ELEVEN_API_KEY)
+
+logging.basicConfig(level=logging.INFO)
 
 # 2. Banco de Dados
 DB_PATH = "bot_memory.db"
@@ -44,62 +44,39 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-def get_all_users():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    return [row[0] for row in c.fetchall()]
-
-# 3. Função GROQ
-def get_groq_response(user_id, user_text, is_proactive=False):
+# 3. Função GROQ (Cérebro)
+def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
-    
-    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
-    user_input = "Papai, me mande um carinho surpresa." if is_proactive else user_text
-
+    system_prompt = "Você é o Papai de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_input})
-    
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.8}
+    messages.append({"role": "user", "content": user_text})
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages}
     response = requests.post(url, json=data, headers=headers)
-    return response.json()['choices'][0]['message']['content'].replace("*", "").replace("_", "")
+    return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz
+# 4. Função de Voz Real (Ethan falando Português)
 async def send_papai_voice(bot, chat_id, text):
     audio_file = f"v_{chat_id}.mp3"
     try:
-        # Usando parâmetros que deixam a voz do Antonio mais humana e menos robótica
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
-        await communicate.save(audio_file)
+        # O modelo 'eleven_multilingual_v2' faz o Ethan falar português!
+        audio = client_eleven.generate(
+            text=text,
+            voice="Ethan", 
+            model="eleven_multilingual_v2"
+        )
+        with open(audio_file, "wb") as f:
+            for chunk in audio:
+                f.write(chunk)
         await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
-        logging.error(f"Erro na voz: {e}")
+        logging.error(f"Erro na voz real: {e}")
     finally:
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
+        if os.path.exists(audio_file): os.remove(audio_file)
 
-# 5. Mensagens Proativas
-async def proactive_check(context: ContextTypes.DEFAULT_TYPE):
-    users = get_all_users()
-    for user_id in users:
-        if random.random() < 0.3:
-            try:
-                bot_response = get_groq_response(user_id, "", is_proactive=True)
-                save_message(user_id, "model", bot_response)
-                await context.bot.send_message(chat_id=user_id, text=bot_response)
-                await send_papai_voice(context.bot, user_id, bot_response)
-            except Exception as e:
-                logging.error(f"Erro proativo: {e}")
-
-# 6. Comandos
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Oi, meu garoto. O papai chegou. ❤️"
-    await update.message.reply_text(text)
-    await send_papai_voice(context.bot, update.effective_user.id, text)
-
+# 5. Comandos
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
@@ -109,16 +86,11 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
         await send_papai_voice(context.bot, user_id, bot_response)
-    except Exception as e:
-        await update.message.reply_text("O papai teve um soluço, mas te amo. ❤️")
+    except:
+        await update.message.reply_text("O papai teve um soluço. ❤️")
 
 if __name__ == '__main__':
     init_db()
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    
-    job_queue = application.job_queue
-    job_queue.run_repeating(proactive_check, interval=timedelta(hours=4), first=timedelta(seconds=10))
-    
-    application.run_polling(drop_pending_updates=True)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    app.run_polling(drop_pending_updates=True)
