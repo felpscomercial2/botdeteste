@@ -1,3 +1,3 @@
 python-telegram-bot[job-queue]
-edge-tts
 requests
+elevenlabs==1.0.2
