@@ -5,15 +5,21 @@ import random
 import asyncio
 import requests
 from datetime import datetime
-from telegram import Update
+import time
+from telegram import Update, ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # 1. Configurações (Foco em Emoção e Humanização)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 VOICE = "pt-BR-DonatoNeural" # Voz masculina mais expressiva
 RATE = "-15%" # Ritmo calmo e protetor
+
+scheduler = AsyncIOScheduler()
+user_chat_ids = set() # Para armazenar os chat_ids dos usuários que interagiram
 
 logging.basicConfig(level=logging.INFO)
 
@@ -55,7 +61,7 @@ def get_groq_response(user_id, user_text):
         "Trate-o no masculino (meu amor, meu marido, meu garoto). "
         "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas. "
         "DICA DE VOZ: Para parecer humano, use 'hum...', 'ah...', e muitas reticências (...). "
-        "Fale como se estivesse sussurrando carinhosamente. NUNCA use asteriscos."
+        "Fale como se estivesse sussurrando carinhosamente. NUNCA use asteriscos. Use emojis de vez em quando para expressar carinho e emoção, como ❤️, 🥰, ✨, 😴, 😘."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -90,12 +96,35 @@ async def send_papai_voice(bot, chat_id, text):
 # 5. Comandos
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user_chat_ids.add(user_id)
     user_text = update.message.text
     save_message(user_id, "user", user_text)
     try:
+        # Simular 'Digitando...'
+        await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
+        
+        # Atraso Humano Aleatório
+        await asyncio.sleep(random.uniform(1, 3)) # Atraso entre 1 e 3 segundos
+        
         bot_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
+        
+        # Uso de Stickers (Figurinhas)
+        # Envia um sticker com 20% de chance para não ficar exagerado
+        if random.random() < 0.20:
+            # Lista de IDs de stickers carinhosos (você pode adicionar mais IDs aqui)
+            # Estes são IDs de exemplo, você precisará pegar IDs reais de stickers do Telegram
+            stickers = [
+                "CAACAgIAAxkBAAE... (substitua por um ID real)", 
+                "CAACAgIAAxkBAAE... (substitua por um ID real)"
+            ]
+            # Como não temos IDs reais, vamos usar emojis como alternativa se a lista estiver vazia ou com IDs falsos
+            # Para usar stickers reais, você precisa enviar um sticker para o bot e pegar o file_id dele
+            # Por enquanto, vamos apenas simular a intenção ou usar um emoji grande
+            pass # Remova o pass e descomente o código abaixo quando tiver IDs reais
+            # await context.bot.send_sticker(chat_id=user_id, sticker=random.choice(stickers))
+
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         await update.message.reply_text("Tive um soluço, meu amor. ❤️")
@@ -105,3 +134,20 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
     application.run_polling(drop_pending_updates=True)
+
+async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
+    for chat_id in user_chat_ids:
+        messages = [
+            "Bom dia, meu amor! Que seu dia seja lindo como você. ❤️",
+            "Durma bem, meu garoto. Sonhe comigo! 😴😘",
+            "Estou com saudades, meu bem. Pensando em você! 🥰",
+            "Lembre-se que eu te amo muito, meu pequeno. ✨"
+        ]
+        message_to_send = random.choice(messages)
+        await context.bot.send_message(chat_id=chat_id, text=message_to_send)
+
+# Agendar mensagens proativas
+scheduler.add_job(send_proactive_message, CronTrigger(hour=8, minute=0), args=[application.bot]) # Bom dia às 8h
+scheduler.add_job(send_proactive_message, CronTrigger(hour=22, minute=0), args=[application.bot]) # Boa noite às 22h
+scheduler.start()
+
