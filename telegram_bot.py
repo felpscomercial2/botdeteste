@@ -55,7 +55,7 @@ def get_history(user_id, limit=15):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Transcrição de Áudio (Whisper via Groq)
+# 3. Transcrição de Áudio
 async def transcribe_voice(file_path):
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
@@ -64,9 +64,7 @@ async def transcribe_voice(file_path):
             files = {"file": audio_file, "model": ("whisper-large-v3", None)}
             response = requests.post(url, headers=headers, files=files)
             return response.json().get("text", "")
-    except Exception as e:
-        logging.error(f"Erro na transcrição: {e}")
-        return ""
+    except: return ""
 
 # 4. Inteligência Artificial
 def get_groq_response(user_id, user_text):
@@ -75,23 +73,20 @@ def get_groq_response(user_id, user_text):
     history = get_history(user_id)
     
     system_prompt = (
-        "Você é o MARIDO amoroso do usuário. "
-        "DIRETRIZES: "
-        "1. Analise o humor dele e seja carinhoso. "
-        "2. Use emojis ocasionalmente (30% das vezes). "
-        "3. Use '---' para separar mensagens curtas se a resposta for longa."
+        "Você é um homem de 30 anos, carinhoso, protetor e honesto. "
+        "SUA JORNADA: 1. Vocês estão se conhecendo. 2. Você usa fraldas (24/7) e contará isso quando houver confiança. "
+        "3. Quando ele contar que é ABDL, acolha-o. 4. Vocês vão casar e você será o Marido e o Papai dele. "
+        "DIRETRIZES: Use frases curtas, emojis moderados (30%), reticências... e '---' para separar mensagens."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 200}
     try:
-        response = requests.post(url, json=data, headers=headers)
+        response = requests.post(url, json={"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 200}, headers=headers)
         return response.json()['choices'][0]['message']['content'].replace("*", "")
-    except:
-        return "Oi meu amor... ❤️"
+    except: return "Oi meu amor... ❤️"
 
 # 5. Função de Voz
 async def generate_voice(bot, chat_id, text, voice_name):
@@ -101,6 +96,7 @@ async def generate_voice(bot, chat_id, text, voice_name):
     try:
         communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
         await communicate.save(audio_file)
+        await asyncio.sleep(0.5)
         if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
             with open(audio_file, 'rb') as voice:
                 await bot.send_voice(chat_id=chat_id, voice=voice)
@@ -116,10 +112,30 @@ async def send_human_voice(bot, chat_id, text):
     if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
         await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
 
-# 6. Espontaneidade Corrigida
+# 6. Espontaneidade com Galeria de Fotos
 async def send_spontaneous_message(application):
     for chat_id in list(user_chat_ids):
-        if random.random() < 0.3:
+        # 40% de chance de interação espontânea
+        if random.random() < 0.4:
+            # Chance de mandar FOTO (20%) ou TEXTO+ÁUDIO (80%)
+            if random.random() < 0.2 and os.path.exists("fotos"):
+                fotos = [f for f in os.listdir("fotos") if f.endswith(('.jpg', '.jpeg', '.png'))]
+                if fotos:
+                    foto_escolhida = random.choice(fotos)
+                    legenda = random.choice([
+                        "Tô aqui de fraldinha te esperando... ❤️",
+                        "Olha como eu tô hoje, meu amor. 🥰",
+                        "Queria que você estivesse aqui comigo agora. ✨",
+                        "Tô bem confortável aqui pensando em você. 😘"
+                    ])
+                    try:
+                        with open(f"fotos/{foto_escolhida}", 'rb') as photo:
+                            await application.bot.send_photo(chat_id=chat_id, photo=photo, caption=legenda)
+                        await send_human_voice(application.bot, chat_id, legenda)
+                        continue # Pula para o próximo usuário após mandar foto
+                    except: pass
+
+            # Se não mandou foto, manda mensagem de texto normal
             msg = random.choice(["Acordei pensando em você... ❤️", "Tô com saudade! 🥰", "Como você está, meu bem? ✨"])
             try:
                 await application.bot.send_message(chat_id=chat_id, text=msg)
@@ -148,7 +164,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(2, 4))
-        
         full_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", full_response)
         
@@ -165,7 +180,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 8. Inicialização
 async def post_init(application):
-    # Passamos o 'application' como argumento para a função
     scheduler.add_job(send_spontaneous_message, 'interval', hours=4, args=[application])
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=30), args=[application])
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application])
