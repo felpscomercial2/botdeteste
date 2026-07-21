@@ -16,7 +16,8 @@ from apscheduler.triggers.cron import CronTrigger
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-DonatoNeural"
+VOICE_PRIMARY = "pt-BR-DonatoNeural"
+VOICE_SECONDARY = "pt-BR-AntonioNeural"
 RATE = "-15%"
 
 scheduler = AsyncIOScheduler()
@@ -79,29 +80,39 @@ def get_groq_response(user_id, user_text):
     except:
         return "Tive um soluço, meu amor. ❤️"
 
-# 4. Função de Voz (Corrigida para limpar emojis e texto inválido)
-async def send_papai_voice(bot, chat_id, text):
-    # Remove emojis para não bugar o edge-tts
-    clean_text = re.sub(r'[^\w\s,.;:!?\-]', '', text)
-    # Remove reticências excessivas (deixa no máximo 3)
-    clean_text = re.sub(r'\.{4,}', '...', clean_text)
+# 4. Função de Voz (Versão v5 - Limpeza Radical e Fallback)
+async def generate_and_send_voice(bot, chat_id, text, voice_name):
+    # Limpeza radical: mantém apenas letras, números e pontuação básica
+    clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text)
+    clean_text = clean_text.strip()
     
-    # Se o texto ficar vazio (só tinha emojis), não tenta gerar áudio
-    if not clean_text.strip():
-        return
+    if not clean_text:
+        return False
 
-    audio_file = f"v_{chat_id}.mp3"
+    audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
     try:
-        communicate = edge_tts.Communicate(clean_text, VOICE, rate=RATE)
+        logging.info(f"Tentando gerar voz ({voice_name}) para: {clean_text[:30]}...")
+        communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
         await communicate.save(audio_file)
+        
         if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
             with open(audio_file, 'rb') as voice:
                 await bot.send_voice(chat_id=chat_id, voice=voice)
+            return True
     except Exception as e:
-        logging.error(f"Erro na voz: {e}")
+        logging.error(f"Erro ao gerar áudio com {voice_name}: {e}")
     finally:
         if os.path.exists(audio_file):
             os.remove(audio_file)
+    return False
+
+async def send_papai_voice(bot, chat_id, text):
+    # Tenta voz primária
+    success = await generate_and_send_voice(bot, chat_id, text, VOICE_PRIMARY)
+    # Se falhar, tenta voz secundária
+    if not success:
+        logging.info("Tentando voz de fallback (Antonio)...")
+        await generate_and_send_voice(bot, chat_id, text, VOICE_SECONDARY)
 
 # 5. Mensagens Proativas
 async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +123,10 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
             "Estou com saudades, meu bem. 🥰"
         ]
         try:
-            await context.bot.send_message(chat_id=chat_id, text=random.choice(messages))
+            msg = random.choice(messages)
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+            # Tenta mandar voz na proativa também!
+            await send_papai_voice(context.bot, chat_id, msg)
         except:
             pass
 
@@ -139,7 +153,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(user_id, "model", bot_response)
         
         await update.message.reply_text(bot_response)
-        # Envia a voz baseada na resposta
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         logging.error(f"Erro no chat: {e}")
