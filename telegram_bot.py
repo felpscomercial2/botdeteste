@@ -13,7 +13,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
-# Só inicia a ElevenLabs se a chave existir para não dar crash
 client_eleven = None
 if ELEVEN_API_KEY:
     client_eleven = ElevenLabs(api_key=ELEVEN_API_KEY)
@@ -46,7 +45,7 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função GROQ (Cérebro)
+# 3. Função GROQ
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -94,6 +93,9 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
-    app.run_polling(drop_pending_updates=True)
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    
+    # O SEGREDO: drop_pending_updates=True limpa o erro de Conflict na hora!
+    print("Iniciando o bot e limpando conexões antigas...")
+    application.run_polling(drop_pending_updates=True)
