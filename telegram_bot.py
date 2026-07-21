@@ -13,8 +13,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
-# Iniciando o cérebro da voz
-client_eleven = ElevenLabs(api_key=ELEVEN_API_KEY)
+# Só inicia a ElevenLabs se a chave existir para não dar crash
+client_eleven = None
+if ELEVEN_API_KEY:
+    client_eleven = ElevenLabs(api_key=ELEVEN_API_KEY)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,11 +59,11 @@ def get_groq_response(user_id, user_text):
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz Real (Ethan falando Português)
+# 4. Função de Voz Real (Ethan)
 async def send_papai_voice(bot, chat_id, text):
+    if not client_eleven: return
     audio_file = f"v_{chat_id}.mp3"
     try:
-        # O modelo 'eleven_multilingual_v2' faz o Ethan falar português!
         audio = client_eleven.generate(
             text=text,
             voice="Ethan", 
@@ -69,10 +71,10 @@ async def send_papai_voice(bot, chat_id, text):
         )
         with open(audio_file, "wb") as f:
             for chunk in audio:
-                f.write(chunk)
+                if chunk: f.write(chunk)
         await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
-        logging.error(f"Erro na voz real: {e}")
+        logging.error(f"Erro na voz: {e}")
     finally:
         if os.path.exists(audio_file): os.remove(audio_file)
 
@@ -86,7 +88,8 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(user_id, "model", bot_response)
         await update.message.reply_text(bot_response)
         await send_papai_voice(context.bot, user_id, bot_response)
-    except:
+    except Exception as e:
+        logging.error(f"Erro no chat: {e}")
         await update.message.reply_text("O papai teve um soluço. ❤️")
 
 if __name__ == '__main__':
