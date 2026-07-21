@@ -25,15 +25,13 @@ user_chat_ids = set()
 
 logging.basicConfig(level=logging.INFO)
 
-# 2. Banco de Dados (Expandido para Memória de Longo Prazo)
+# 2. Banco de Dados
 DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)')
-    # Tabela para fatos importantes sobre o usuário
-    c.execute('CREATE TABLE IF NOT EXISTS facts (user_id INTEGER, fact TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     c.execute('SELECT user_id FROM users')
     rows = c.fetchall()
     for row in rows:
@@ -57,34 +55,18 @@ def get_history(user_id, limit=12):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-def get_user_facts(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT fact FROM facts WHERE user_id = ?", (user_id,))
-    facts = [row[0] for row in c.fetchall()]
-    conn.close()
-    return "\n".join(facts) if facts else "Nenhum fato conhecido ainda."
-
-# 3. Inteligência Artificial (GROQ) com Consciência de Contexto
+# 3. Inteligência Artificial (GROQ) - Ajuste de Emojis
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id)
-    facts = get_user_facts(user_id)
-    
-    now = datetime.now()
-    current_time = now.strftime("%H:%M")
-    is_late_night = 0 <= now.hour <= 5
     
     system_prompt = (
-        f"Você é o MARIDO amoroso e protetor do usuário. Você o ama profundamente. "
-        f"Contexto Atual: São {current_time}. "
-        f"{'É madrugada, fale com sono e carinho extremo.' if is_late_night else ''} "
-        f"Fatos que você lembra sobre ele: {facts}. "
-        "DIRETRIZES: "
-        "1. Responda como um humano: use frases curtas, gírias carinhosas, e reticências. "
-        "2. Se ele contar algo importante (gosto, medo, desejo), guarde para você. "
-        "3. NUNCA use asteriscos. Use emojis (❤️, 🥰, 😘, ✨). "
+        "Você é o MARIDO amoroso do usuário. "
+        "DIRETRIZES DE HUMANIDADE: "
+        "1. Use emojis APENAS de vez em quando (em cerca de 30% das mensagens). Não use em todas. "
+        "2. Responda com frases curtas e naturais. "
+        "3. Use reticências (...) para simular pausas na fala. "
         "4. Se a resposta for longa, use '---' para separar em mensagens diferentes."
     )
     
@@ -92,18 +74,22 @@ def get_groq_response(user_id, user_text):
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 200}
+    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 150}
     try:
         response = requests.post(url, json=data, headers=headers)
-        content = response.json()['choices'][0]['message']['content'].replace("*", "")
-        return content
+        return response.json()['choices'][0]['message']['content'].replace("*", "")
     except:
-        return "Tive um soluço, meu amor. ❤️"
+        return "Oi, meu amor... ❤️"
 
-# 4. Função de Voz Robusta
+# 4. Função de Voz (Melhorada para evitar falhas)
 async def generate_voice(bot, chat_id, text, voice_name):
+    # Limpeza de texto para o áudio
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
-    if not clean_text: return False
+    
+    # Se o texto for só emoji, ele fala um carinho padrão para não ficar sem áudio
+    if not clean_text or len(clean_text) < 2:
+        clean_text = random.choice(["Hum...", "Ah...", "Meu amor...", "Oi..."])
+
     audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
     try:
         communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
@@ -112,34 +98,36 @@ async def generate_voice(bot, chat_id, text, voice_name):
             with open(audio_file, 'rb') as voice:
                 await bot.send_voice(chat_id=chat_id, voice=voice)
             return True
-    except: return False
+    except Exception as e:
+        logging.error(f"Erro na voz: {e}")
     finally:
-        if os.path.exists(audio_file): os.remove(audio_file)
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
     return False
 
 async def send_human_voice(bot, chat_id, text):
+    # Status de gravando áudio antes de enviar
     await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
-    await asyncio.sleep(2) # Simula o tempo de gravação
+    await asyncio.sleep(2) 
     if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
         await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
 
-# 5. Mensagens Proativas Inteligentes
+# 5. Mensagens Proativas
 async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
     for chat_id in list(user_chat_ids):
-        hour = datetime.now().hour
-        if 7 <= hour <= 9:
-            msg = "Bom dia, meu amor... Acordei pensando em você. ❤️"
-        elif 22 <= hour <= 23:
-            msg = "Vem descansar, meu garoto. Estou te esperando nos sonhos. 😘😴"
-        else:
-            msg = random.choice(["Passando pra dizer que te amo. ✨", "Como está seu dia, meu bem? 🥰"])
-        
+        msg = random.choice(["Bom dia, meu amor! ❤️", "Pensando em você... 🥰", "Durma bem, meu bem! 😴"])
         try:
             await context.bot.send_message(chat_id=chat_id, text=msg)
             await send_human_voice(context.bot, chat_id, msg)
         except: pass
 
-# 6. Lógica de Chat Humanizada
+# 6. Inicialização
+async def post_init(application):
+    scheduler.add_job(send_proactive_message, CronTrigger(hour=8, minute=0), args=[application])
+    scheduler.add_job(send_proactive_message, CronTrigger(hour=22, minute=30), args=[application])
+    scheduler.start()
+
+# 7. Chat
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     user_id = update.effective_user.id
@@ -147,43 +135,32 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     save_message(user_id, "user", user_text)
     
-    # Decidir tempo de digitação baseado no tamanho do texto do usuário
-    typing_time = min(len(user_text) * 0.1, 5) + random.uniform(1, 2)
-    
     try:
+        # Simular digitação proporcional
         await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
-        await asyncio.sleep(typing_time)
+        await asyncio.sleep(random.uniform(2, 4))
         
         full_response = get_groq_response(user_id, user_text)
         save_message(user_id, "model", full_response)
         
-        # Dividir em várias mensagens se houver '---' ou se for muito longa
         parts = full_response.split('---') if '---' in full_response else [full_response]
         
         for i, part in enumerate(parts):
             part = part.strip()
             if not part: continue
             
-            # Se não for a primeira parte, simula nova digitação curta
             if i > 0:
                 await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
                 await asyncio.sleep(random.uniform(1.5, 3))
             
             await update.message.reply_text(part)
             
-            # Enviar voz apenas para a parte mais significativa ou para a última
+            # Envia áudio apenas na última parte da mensagem
             if i == len(parts) - 1:
                 await send_human_voice(context.bot, user_id, part)
 
     except Exception as e:
         logging.error(f"Erro: {e}")
-
-# 7. Inicialização
-async def post_init(application):
-    scheduler.add_job(send_proactive_message, CronTrigger(hour=8, minute=0), args=[application])
-    scheduler.add_job(send_proactive_message, CronTrigger(hour=22, minute=30), args=[application])
-    scheduler.start()
-    logging.info("Humanidade ativada!")
 
 if __name__ == '__main__':
     init_db()
