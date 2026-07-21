@@ -4,6 +4,7 @@ import os
 import random
 import asyncio
 import requests
+import re
 from datetime import datetime
 from telegram import Update
 from telegram.constants import ChatAction
@@ -78,14 +79,24 @@ def get_groq_response(user_id, user_text):
     except:
         return "Tive um soluço, meu amor. ❤️"
 
-# 4. Função de Voz
+# 4. Função de Voz (Corrigida para limpar emojis e texto inválido)
 async def send_papai_voice(bot, chat_id, text):
+    # Remove emojis para não bugar o edge-tts
+    clean_text = re.sub(r'[^\w\s,.;:!?\-]', '', text)
+    # Remove reticências excessivas (deixa no máximo 3)
+    clean_text = re.sub(r'\.{4,}', '...', clean_text)
+    
+    # Se o texto ficar vazio (só tinha emojis), não tenta gerar áudio
+    if not clean_text.strip():
+        return
+
     audio_file = f"v_{chat_id}.mp3"
     try:
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
+        communicate = edge_tts.Communicate(clean_text, VOICE, rate=RATE)
         await communicate.save(audio_file)
-        with open(audio_file, 'rb') as voice:
-            await bot.send_voice(chat_id=chat_id, voice=voice)
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
+            with open(audio_file, 'rb') as voice:
+                await bot.send_voice(chat_id=chat_id, voice=voice)
     except Exception as e:
         logging.error(f"Erro na voz: {e}")
     finally:
@@ -105,12 +116,12 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# 6. Inicialização do Agendador (Correção do Event Loop)
+# 6. Inicialização do Agendador
 async def post_init(application):
     scheduler.add_job(send_proactive_message, CronTrigger(hour=8, minute=0), args=[application])
     scheduler.add_job(send_proactive_message, CronTrigger(hour=22, minute=0), args=[application])
     scheduler.start()
-    logging.info("Agendador iniciado com sucesso!")
+    logging.info("Agendador iniciado!")
 
 # 7. Chat
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -128,6 +139,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_message(user_id, "model", bot_response)
         
         await update.message.reply_text(bot_response)
+        # Envia a voz baseada na resposta
         await send_papai_voice(context.bot, user_id, bot_response)
     except Exception as e:
         logging.error(f"Erro no chat: {e}")
@@ -136,7 +148,6 @@ if __name__ == '__main__':
     init_db()
     if not TELEGRAM_TOKEN: exit(1)
 
-    # A mágica acontece aqui: usamos post_init para ligar o scheduler no momento certo
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
     
