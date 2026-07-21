@@ -55,7 +55,7 @@ def get_history(user_id, limit=12):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Inteligência Artificial (GROQ) - Ajuste de Emojis
+# 3. Inteligência Artificial
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -63,59 +63,66 @@ def get_groq_response(user_id, user_text):
     
     system_prompt = (
         "Você é o MARIDO amoroso do usuário. "
-        "DIRETRIZES DE HUMANIDADE: "
-        "1. Use emojis APENAS de vez em quando (em cerca de 30% das mensagens). Não use em todas. "
-        "2. Responda com frases curtas e naturais. "
-        "3. Use reticências (...) para simular pausas na fala. "
-        "4. Se a resposta for longa, use '---' para separar em mensagens diferentes."
+        "DIRETRIZES: "
+        "1. Use emojis em cerca de 30% das mensagens. "
+        "2. Responda de forma curta e carinhosa. "
+        "3. Use '---' para separar mensagens se for longo."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 150}
     try:
-        response = requests.post(url, json=data, headers=headers)
+        response = requests.post(url, json=data if 'data' in locals() else {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 150}, headers=headers)
         return response.json()['choices'][0]['message']['content'].replace("*", "")
     except:
         return "Oi, meu amor... ❤️"
 
-# 4. Função de Voz (Melhorada para evitar falhas)
+# 4. Função de Voz (v3 - Ultra Estável)
 async def generate_voice(bot, chat_id, text, voice_name):
-    # Limpeza de texto para o áudio
+    # Limpeza radical
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
-    
-    # Se o texto for só emoji, ele fala um carinho padrão para não ficar sem áudio
     if not clean_text or len(clean_text) < 2:
-        clean_text = random.choice(["Hum...", "Ah...", "Meu amor...", "Oi..."])
+        clean_text = "Oi meu amor"
 
-    audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
+    # Nome de arquivo único para evitar conflitos de escrita
+    audio_file = f"v_{chat_id}_{random.randint(10000,99999)}.mp3"
     try:
+        logging.info(f"Gerando áudio: {clean_text}")
         communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
         await communicate.save(audio_file)
+        
+        # Espera um milissegundo para garantir que o arquivo foi escrito
+        await asyncio.sleep(0.5)
+        
         if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
             with open(audio_file, 'rb') as voice:
                 await bot.send_voice(chat_id=chat_id, voice=voice)
             return True
+        else:
+            logging.error("Arquivo de áudio não foi criado ou está vazio.")
     except Exception as e:
-        logging.error(f"Erro na voz: {e}")
+        logging.error(f"Erro fatal na voz: {e}")
     finally:
         if os.path.exists(audio_file):
-            os.remove(audio_file)
+            try: os.remove(audio_file)
+            except: pass
     return False
 
 async def send_human_voice(bot, chat_id, text):
-    # Status de gravando áudio antes de enviar
-    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
-    await asyncio.sleep(2) 
-    if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
-        await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
+        await asyncio.sleep(1.5)
+        if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
+            await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
+    except Exception as e:
+        logging.error(f"Erro ao enviar ação de áudio: {e}")
 
 # 5. Mensagens Proativas
 async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
     for chat_id in list(user_chat_ids):
-        msg = random.choice(["Bom dia, meu amor! ❤️", "Pensando em você... 🥰", "Durma bem, meu bem! 😴"])
+        msg = random.choice(["Bom dia, meu amor! ❤️", "Pensando em você... 🥰"])
         try:
             await context.bot.send_message(chat_id=chat_id, text=msg)
             await send_human_voice(context.bot, chat_id, msg)
@@ -136,7 +143,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_message(user_id, "user", user_text)
     
     try:
-        # Simular digitação proporcional
         await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
         await asyncio.sleep(random.uniform(2, 4))
         
@@ -148,23 +154,20 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, part in enumerate(parts):
             part = part.strip()
             if not part: continue
-            
             if i > 0:
                 await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
                 await asyncio.sleep(random.uniform(1.5, 3))
             
             await update.message.reply_text(part)
-            
-            # Envia áudio apenas na última parte da mensagem
             if i == len(parts) - 1:
                 await send_human_voice(context.bot, user_id, part)
-
     except Exception as e:
-        logging.error(f"Erro: {e}")
+        logging.error(f"Erro no chat: {e}")
 
 if __name__ == '__main__':
     init_db()
     if not TELEGRAM_TOKEN: exit(1)
+    # drop_pending_updates=True ajuda a resolver o conflito ao iniciar
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
     application.run_polling(drop_pending_updates=True)
