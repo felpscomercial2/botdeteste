@@ -9,11 +9,12 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações
+# 1. Configurações (Voz garantida!)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-DonatoNeural"
-RATE = "-10%"
+VOICE = "pt-BR-AntonioNeural" # Voz masculina padrão que sempre funciona
+RATE = "-15%" # Mais lenta para ser mais carinhosa
+PITCH = "-5Hz" # Um pouquinho mais grave para ser mais masculina
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -31,7 +32,7 @@ def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
-    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now()))
+    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -55,12 +56,8 @@ def get_groq_response(user_id, user_text, is_proactive=False):
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id )
     
-    if is_proactive:
-        system_prompt = "Você é o 'Papai' de um homem ABDL. Inicie uma conversa curta e carinhosa. Pergunte como ele está ou diga que estava pensando nele. Seja protetor. Trate-o no masculino. Sem asteriscos."
-        user_input = "Papai, me mande um carinho surpresa."
-    else:
-        system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
-        user_input = user_text
+    system_prompt = "Você é o 'Papai' de um homem ABDL. Seja protetor e carinhoso. Trate-o no masculino. Sem asteriscos."
+    user_input = "Papai, me mande um carinho surpresa." if is_proactive else user_text
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -72,9 +69,10 @@ def get_groq_response(user_id, user_text, is_proactive=False):
 
 # 4. Função de Voz
 async def send_papai_voice(bot, chat_id, text):
-    audio_file = f"v_{chat_id}_{random.randint(1,1000)}.mp3"
+    audio_file = f"v_{chat_id}.mp3"
     try:
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
+        # Usando parâmetros que deixam a voz do Antonio mais humana e menos robótica
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
         await communicate.save(audio_file)
         await bot.send_voice(chat_id=chat_id, voice=open(audio_file, 'rb'))
     except Exception as e:
@@ -83,11 +81,11 @@ async def send_papai_voice(bot, chat_id, text):
         if os.path.exists(audio_file):
             os.remove(audio_file)
 
-# 5. Mensagens Proativas (O bot fala sozinho)
+# 5. Mensagens Proativas
 async def proactive_check(context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users()
     for user_id in users:
-        if random.random() < 0.3: # 30% de chance de falar
+        if random.random() < 0.3:
             try:
                 bot_response = get_groq_response(user_id, "", is_proactive=True)
                 save_message(user_id, "model", bot_response)
@@ -120,7 +118,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
     
-    # Agendar as mensagens surpresa a cada 4 horas
     job_queue = application.job_queue
     job_queue.run_repeating(proactive_check, interval=timedelta(hours=4), first=timedelta(seconds=10))
     
