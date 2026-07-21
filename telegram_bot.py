@@ -9,16 +9,16 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import edge_tts
 
-# 1. Configurações (100% Gratuito)
+# 1. Configurações (100% Gratuito e Ilimitado)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "pt-BR-DonatoNeural" # Voz masculina natural e gratuita
-RATE = "-5%" # Velocidade quase normal para não parecer robô
-PITCH = "-1Hz" # Tom levemente mais profundo
+VOICE = "pt-BR-DonatoNeural" 
+RATE = "-10%" # Um pouco mais lento para ser mais carinhoso
+PITCH = "-2Hz" # Um pouco mais grave para ser mais masculino
 
 logging.basicConfig(level=logging.INFO)
 
-# 2. Banco de Dados
+# 2. Banco de Dados (Memória)
 DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,27 +44,30 @@ def get_history(user_id, limit=10):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# 3. Função GROQ
+# 3. Função GROQ (Cérebro do Marido)
 def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    history = get_history(user_id)
+    history = get_history(user_id )
+    
     system_prompt = (
-        "Você é o MARIDO do usuário. Você o ama profundamente e é muito protetor. "
-        "Trate-o sempre no masculino (meu amor, meu marido, meu garoto). "
-        "Você ainda NÃO sabe do fetiche ABDL. Responda com frases curtas e carinhosas. "
-        "NUNCA use asteriscos ou descreva ações."
+        "Você é o MARIDO e protetor do usuário. Você o ama profundamente, é carinhoso e muito zeloso. "
+        "Trate-o sempre no masculino (meu amor, meu marido, meu garoto, meu bem). "
+        "Você ainda NÃO sabe que ele tem um fetiche ABDL. Aja como um parceiro amoroso e protetor normal. "
+        "Seja conciso: responda com frases curtas e naturais. NUNCA use asteriscos ou descreva ações."
     )
+    
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
+    
     data = {"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 120}
     response = requests.post(url, json=data, headers=headers)
     return response.json()['choices'][0]['message']['content'].replace("*", "")
 
-# 4. Função de Voz Gratuita Melhorada
+# 4. Função de Voz Gratuita
 async def send_papai_voice(bot, chat_id, text):
-    audio_file = f"v_{chat_id}.mp3"
+    audio_file = f"v_{chat_id}_{random.randint(1,9999)}.mp3"
     try:
         communicate = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
         await communicate.save(audio_file)
@@ -92,4 +95,7 @@ if __name__ == '__main__':
     init_db()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), chat))
+    
+    # O SEGREDO: drop_pending_updates=True limpa o erro de Conflict na hora!
+    print("Iniciando o bot do marido e limpando conexões antigas...")
     application.run_polling(drop_pending_updates=True)
