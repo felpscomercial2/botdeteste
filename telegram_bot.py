@@ -265,7 +265,7 @@ async def generate_voice(bot, chat_id, text, voice_name):
 
 async def send_human_voice(bot, chat_id, text):
     # Simula gravando áudio
-    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
+    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
     # Tempo proporcional ao tamanho do texto
     await asyncio.sleep(min(len(text) * 0.05, 5))
     
