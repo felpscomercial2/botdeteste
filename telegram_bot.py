@@ -5,10 +5,11 @@ import random
 import asyncio
 import requests
 import re
+import hashlib
 from datetime import datetime
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import edge_tts
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -39,6 +40,10 @@ VOICES_MASCULINAS = [
 RATE_RANGE = (-10, 3)     # em %
 PITCH_RANGE = (-12, 12)   # em Hz
 FOTOS_PATH = "Fotos"
+TTS_CACHE_PATH = "tts_cache"
+# Só vale cachear textos curtos (frases fixas tipo bom dia/legendas) — respostas
+# geradas pelo LLM são praticamente sempre únicas, então cachear não ajudaria.
+TTS_CACHE_MAX_CHARS = 120
 
 # Estágios do relacionamento e limites de mensagens do usuário para progressão automática
 STAGES = ["conhecendo", "namorando", "noivos", "casados"]
@@ -54,9 +59,16 @@ SECRET_REVEAL_AFTER = 10
 # Configuração das mensagens espontâneas
 SPONTANEOUS_CHANCE = 0.3      # chance de mandar algo em cada ciclo do scheduler
 SPONTANEOUS_PHOTO_CHANCE = 0.35  # dentro de um ciclo que vai mandar algo, chance de ser foto
+# Janela de horário em que o job de intervalo (a cada hora) pode mandar mensagem — evita
+# mandar "bom dia" às 3h da manhã. Os jobs fixos de 8h/22h não usam essa janela.
+SPONTANEOUS_WINDOW_START_HOUR = 9
+SPONTANEOUS_WINDOW_END_HOUR = 21
 
 scheduler = AsyncIOScheduler()
 user_chat_ids = set()
+# Últimas fotos enviadas por usuário (em memória), pra evitar repetir a mesma foto em sequência
+RECENT_PHOTOS_LIMIT = 5
+recent_photos_sent = {}
 logging.basicConfig(level=logging.INFO)
 
 # 2. Banco de Dados
@@ -69,6 +81,9 @@ def init_db():
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME, stage TEXT DEFAULT "conhecendo", message_count INTEGER DEFAULT 0, secret_revealed INTEGER DEFAULT 0)')
+    # Fatos fixos extraídos da conversa (nome, gostos, datas importantes etc.), separados do
+    # histórico bruto — assim não se perdem quando saem da janela das últimas N mensagens.
+    c.execute('CREATE TABLE IF NOT EXISTS facts (user_id INTEGER, fact TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
     # Migração simples caso a tabela já exista de uma versão anterior sem essas colunas
     existing_cols = [row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()]
     if "stage" not in existing_cols:
@@ -144,6 +159,21 @@ def advance_user_state(user_id):
 
     return (new_stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now)
 
+def reset_user_state(user_id, wipe_history=False):
+    """Zera fase/contador/segredo do usuário (pra testar sem precisar mandar 30+ mensagens).
+    Por padrão mantém o histórico de conversa e os fatos; wipe_history=True também apaga tudo."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET stage = 'conhecendo', message_count = 0, secret_revealed = 0 WHERE user_id = ?",
+        (user_id,)
+    )
+    if wipe_history:
+        c.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM facts WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
 def get_history(user_id, limit=20):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -151,6 +181,65 @@ def get_history(user_id, limit=20):
     rows = c.fetchall()
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
+
+def get_facts(user_id, limit=30):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT fact FROM facts WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in reversed(rows)]
+
+def add_fact(user_id, fact):
+    fact = fact.strip()
+    if not fact:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Evita duplicar o mesmo fato exato já salvo
+    c.execute("SELECT 1 FROM facts WHERE user_id = ? AND fact = ?", (user_id, fact))
+    if not c.fetchone():
+        c.execute("INSERT INTO facts (user_id, fact) VALUES (?, ?)", (user_id, fact))
+        conn.commit()
+    conn.close()
+
+def clear_facts(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM facts WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def extract_facts(user_id, user_text):
+    """Usa o LLM pra extrair fatos relevantes e duráveis (nome, gostos, datas, coisas importantes
+    que a pessoa contou) da última mensagem do usuário e salva na tabela separada de fatos."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    prompt = (
+        "Extraia fatos NOVOS, específicos e duráveis sobre a pessoa a partir da mensagem abaixo "
+        "(nome, aniversário, gostos, trabalho, familiares, coisas importantes que ela contou). "
+        "Ignore desabafos passageiros, humor do momento ou small talk sem conteúdo factual. "
+        "Responda APENAS com uma lista, um fato por linha, cada linha curta e objetiva. "
+        "Se não houver nenhum fato relevante, responda apenas com a palavra: nenhum.\n\n"
+        f"Mensagem: {user_text}"
+    )
+    try:
+        data = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 150,
+            "temperature": 0.2,
+        }
+        response = requests.post(url, json=data, headers=headers, timeout=15)
+        content = response.json()['choices'][0]['message']['content']
+        if content.strip().lower().startswith("nenhum"):
+            return
+        for line in content.splitlines():
+            line = line.strip("-• \t")
+            if line and line.lower() != "nenhum":
+                add_fact(user_id, line)
+    except Exception as e:
+        logging.error(f"Erro ao extrair fatos: {e}")
 
 # 3. Transcrição de Áudio
 async def transcribe_voice(file_path):
@@ -164,7 +253,7 @@ async def transcribe_voice(file_path):
     except:
         return ""
 
-def build_system_prompt(stage, secret_revealed, should_reveal_secret_now):
+def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=None):
     base = (
         "Você é o Lucas, 30 anos, mora sozinho (só ele e o cachorro, o Bento, um vira-lata caramelo). "
         "Trabalha com design de interiores, meio período em home office. É do tipo que acorda tarde, "
@@ -239,15 +328,24 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now):
         "\nSe a pessoa contar que também é ABDL ou compartilhar algum gosto/fetiche parecido, acolha com carinho e sem nenhum julgamento."
     )
 
-    return base + "\n\n" + stage_block + secret_block + reciprocity_block
+    facts_block = ""
+    if facts:
+        facts_lines = "\n".join(f"- {f}" for f in facts)
+        facts_block = (
+            "\n\nCOISAS QUE VOCÊ JÁ SABE SOBRE ELA/ELE (use com naturalidade quando fizer sentido, "
+            "sem parecer que está lendo uma ficha):\n" + facts_lines
+        )
+
+    return base + "\n\n" + stage_block + secret_block + reciprocity_block + facts_block
 
 # 4. Inteligência Artificial (Sem Filtros)
 def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_secret_now):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id)
+    facts = get_facts(user_id)
 
-    system_prompt = build_system_prompt(stage, secret_revealed, should_reveal_secret_now)
+    system_prompt = build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts)
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -268,12 +366,76 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
         logging.error(f"Erro no Groq: {e}")
         return "Oi meu amor... desculpa, tive um pequeno soluço, mas tô aqui pra você. ❤️"
 
+def generate_stage_transition_message(user_id, new_stage):
+    """Gera a proposta de progressão de fase (namorar/noivar/casar) pelo LLM, no tom da
+    conversa recente, em vez de usar sempre a mesma frase pronta."""
+    pedido = {
+        "namorando": "pedir ela/ele em namoro",
+        "noivos": "pedir ela/ele em noivado",
+        "casados": "pedir ela/ele em casamento",
+    }.get(new_stage)
+    if not pedido:
+        return None
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    history = get_history(user_id, limit=10)
+    context_lines = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+
+    prompt = (
+        "Você é o Lucas (veja a personalidade e o histórico recente abaixo). Chegou o momento de "
+        f"{pedido}, de forma espontânea e emocionada, curta (1-3 frases), no seu jeito de escrever "
+        "no chat, coerente com o clima da conversa recente. Sem asteriscos, sem descrever ações. "
+        "Responda só com a mensagem, nada mais.\n\n"
+        f"Histórico recente:\n{context_lines}"
+    )
+    try:
+        data = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "system", "content": prompt}],
+            "max_tokens": 150,
+            "temperature": 0.9,
+        }
+        response = requests.post(url, json=data, headers=headers, timeout=15)
+        content = response.json()['choices'][0]['message']['content']
+        return content.replace("*", "").strip()
+    except Exception as e:
+        logging.error(f"Erro ao gerar mensagem de transição de fase: {e}")
+        # Fallback pro texto fixo caso o LLM falhe, pra nunca deixar a progressão muda
+        avisos_fallback = {
+            "namorando": "Percebi que crescemos muito conversando... quer namorar comigo? ❤️",
+            "noivos": "Não quero mais imaginar minha vida sem você... aceita ficar noivo de mim? 🥰",
+            "casados": "Chegou a hora... quer se casar comigo, meu amor? 😘",
+        }
+        return avisos_fallback.get(new_stage)
+
 # 5. Função de Voz (Corrigida e Reforçada)
+def _tts_cache_key(clean_text, voice_name):
+    raw = f"{voice_name}|{clean_text.lower().strip()}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
 async def generate_voice(bot, chat_id, text, voice_name):
     # Limpeza do texto para o TTS não engasgar (mantém ,.!? e reticências, que ajudam nas pausas)
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
     if not clean_text:
         return False
+
+    # Frases curtas (bom dia, legendas de foto etc.) tendem a se repetir — usa cache em disco
+    # pra não gerar TTS de novo toda vez. Respostas do LLM raramente repetem, então ficam de fora.
+    use_cache = len(clean_text) <= TTS_CACHE_MAX_CHARS
+    cache_file = None
+    if use_cache:
+        os.makedirs(TTS_CACHE_PATH, exist_ok=True)
+        cache_key = _tts_cache_key(clean_text, voice_name)
+        cache_file = os.path.join(TTS_CACHE_PATH, f"{cache_key}.mp3")
+        if os.path.exists(cache_file) and os.path.getsize(cache_file) > 0:
+            try:
+                with open(cache_file, 'rb') as voice:
+                    await bot.send_voice(chat_id=chat_id, voice=voice)
+                return True
+            except Exception as e:
+                logging.error(f"Erro ao enviar áudio do cache ({voice_name}): {e}")
+                # Se der erro no cache, cai pro fluxo normal de gerar de novo
 
     # Uma pessoa real não fala com o mesmo ritmo/tom toda vez — varia a cada mensagem
     rate = f"{random.randint(*RATE_RANGE):+d}%"
@@ -290,6 +452,12 @@ async def generate_voice(bot, chat_id, text, voice_name):
         if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
             with open(audio_file, 'rb') as voice:
                 await bot.send_voice(chat_id=chat_id, voice=voice)
+            if use_cache and cache_file:
+                try:
+                    import shutil
+                    shutil.copyfile(audio_file, cache_file)
+                except Exception as e:
+                    logging.error(f"Erro ao salvar cache de TTS: {e}")
             return True
     except Exception as e:
         logging.error(f"Erro TTS ({voice_name}): {e}")
@@ -322,12 +490,18 @@ async def send_photo(bot, chat_id, caption=""):
     fotos = get_photos_list()
     if not fotos:
         return False
-    
-    foto_escolhida = random.choice(fotos)
+
+    ja_enviadas = recent_photos_sent.get(chat_id, [])
+    # Prioriza fotos que não estão entre as últimas enviadas; se todas já foram (pool pequeno), libera geral
+    candidatas = [f for f in fotos if f not in ja_enviadas] or fotos
+    foto_escolhida = random.choice(candidatas)
     foto_path = os.path.join(FOTOS_PATH, foto_escolhida)
     try:
         with open(foto_path, 'rb') as photo:
             await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        historico = recent_photos_sent.setdefault(chat_id, [])
+        historico.append(foto_escolhida)
+        del historico[:-RECENT_PHOTOS_LIMIT]  # mantém só as últimas N
         return True
     except Exception as e:
         logging.error(f"Erro foto: {e}")
@@ -382,7 +556,12 @@ def escolher_legenda_foto(stage, secret_revealed):
     # namorando com segredo já revelado: usa o tom mais leve, ainda sem "marido"
     return random.choice(LEGENDAS_FOTO_ABDL_NOIVOS)
 
-async def send_spontaneous_message(application):
+async def send_spontaneous_message(application, respect_window=False):
+    if respect_window:
+        hora_atual = datetime.now().hour
+        if not (SPONTANEOUS_WINDOW_START_HOUR <= hora_atual < SPONTANEOUS_WINDOW_END_HOUR):
+            return
+
     for chat_id in list(user_chat_ids):
         if ALLOWED_USER_IDS and chat_id not in ALLOWED_USER_IDS:
             continue
@@ -409,6 +588,36 @@ async def send_spontaneous_message(application):
             pass
 
 # 8. Handlers
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    stage, message_count, secret_revealed = get_user_state(user_id)
+    facts = get_facts(user_id)
+    facts_txt = "\n".join(f"- {f}" for f in facts) if facts else "(nenhum ainda)"
+    texto = (
+        f"📊 Status\n"
+        f"Fase: {stage}\n"
+        f"Mensagens contadas: {message_count}\n"
+        f"Segredo revelado: {'sim' if secret_revealed else 'não'}\n\n"
+        f"Fatos salvos:\n{facts_txt}"
+    )
+    await update.message.reply_text(texto)
+
+async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    wipe_history = bool(context.args) and context.args[0].lower() in ("tudo", "all", "full")
+    reset_user_state(user_id, wipe_history=wipe_history)
+    if wipe_history:
+        await update.message.reply_text("Estado, histórico e fatos zerados. Começando do zero. 🔄")
+    else:
+        await update.message.reply_text(
+            "Fase, contador e segredo zerados (histórico e fatos mantidos). "
+            "Use /reset tudo pra apagar tudo também. 🔄"
+        )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -426,7 +635,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
     
     user_text = ""
-    if update.message.voice:
+    was_voice = bool(update.message.voice)
+    if was_voice:
         file = await context.bot.get_file(update.message.voice.file_id)
         file_path = f"voice_{user_id}.ogg"
         await file.download_to_drive(file_path)
@@ -436,10 +646,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = update.message.text
 
     if not user_text:
+        if was_voice:
+            # Transcrição falhou (ou o áudio veio vazio/mudo) — avisa em vez de ignorar a mensagem
+            await update.message.reply_text("Não consegui ouvir direito esse áudio... manda de novo? 🥺")
         return
 
     save_message(user_id, "user", user_text)
-    
+    # Roda em paralelo, não bloqueia a resposta principal
+    asyncio.create_task(asyncio.to_thread(extract_facts, user_id, user_text))
+
     # Palavras-chave para foto
     stage_atual, _, secret_revelado_atual = get_user_state(user_id)
     pode_falar_de_fralda_atual = bool(secret_revelado_atual) and stage_atual in ("namorando", "noivos", "casados")
@@ -477,12 +692,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Mensagem extra e discreta quando a fase do relacionamento muda de patamar
         if stage_just_changed and stage != "conhecendo":
-            avisos = {
-                "namorando": "Percebi que crescemos muito conversando... quer namorar comigo? ❤️",
-                "noivos": "Não quero mais imaginar minha vida sem você... aceita ficar noivo de mim? 🥰",
-                "casados": "Chegou a hora... quer se casar comigo, meu amor? 😘",
-            }
-            aviso = avisos.get(stage)
+            aviso = generate_stage_transition_message(user_id, stage)
             if aviso:
                 await asyncio.sleep(random.uniform(1.5, 3))
                 await update.message.reply_text(aviso)
@@ -494,7 +704,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 9. Inicialização
 async def post_init(application):
     # Mensagens proativas
-    scheduler.add_job(send_spontaneous_message, 'interval', hours=1, args=[application])
+    scheduler.add_job(send_spontaneous_message, 'interval', hours=1, args=[application], kwargs={"respect_window": True})
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=0), args=[application]) # Bom dia
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application]) # Boa noite
     scheduler.start()
@@ -502,9 +712,15 @@ async def post_init(application):
 if __name__ == '__main__':
     init_db()
     if not TELEGRAM_TOKEN:
+        logging.error("TELEGRAM_TOKEN não configurado.")
+        exit(1)
+    if not GROQ_API_KEY:
+        logging.error("GROQ_API_KEY não configurado.")
         exit(1)
     if not ALLOWED_USER_IDS:
         logging.warning("ALLOWED_USER_IDS não configurado — o bot está aberto para qualquer pessoa no Telegram!")
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    application.add_handler(CommandHandler("status", handle_status))
+    application.add_handler(CommandHandler("reset", handle_reset))
     application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     application.run_polling(drop_pending_updates=True)
