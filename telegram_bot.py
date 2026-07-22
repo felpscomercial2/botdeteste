@@ -16,6 +16,12 @@ from apscheduler.triggers.cron import CronTrigger
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+# Restringe o bot a apenas este(s) usuário(s) do Telegram (ID numérico, não o @username).
+# Configure no Railway como variável de ambiente, ex: ALLOWED_USER_IDS=123456789
+# ou vários separados por vírgula: ALLOWED_USER_IDS=123456789,987654321
+_allowed_raw = os.environ.get("ALLOWED_USER_IDS", "")
+ALLOWED_USER_IDS = {int(x.strip()) for x in _allowed_raw.split(",") if x.strip().isdigit()}
 VOICE_PRIMARY = "pt-BR-DonatoNeural"
 VOICE_SECONDARY = "pt-BR-AntonioNeural"
 RATE = "-15%"
@@ -324,6 +330,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+
+    # Bloqueia qualquer pessoa que não esteja na lista de permitidos
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        logging.info(f"Mensagem ignorada de usuário não autorizado: {user_id}")
+        return
+
     user_chat_ids.add(user_id)
     
     # Simula visualização e pensamento
@@ -396,6 +408,8 @@ if __name__ == '__main__':
     init_db()
     if not TELEGRAM_TOKEN:
         exit(1)
+    if not ALLOWED_USER_IDS:
+        logging.warning("ALLOWED_USER_IDS não configurado — o bot está aberto para qualquer pessoa no Telegram!")
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     application.run_polling(drop_pending_updates=True)
