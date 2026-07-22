@@ -17,6 +17,9 @@ from apscheduler.triggers.cron import CronTrigger
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+# Nome do modelo de chat da Groq, centralizado aqui — a Groq descontinua modelos periodicamente
+# (foi o caso do llama-3.3-70b-versatile em jun/2026), então só precisa trocar em um lugar.
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Restringe o bot a apenas este(s) usuário(s) do Telegram (ID numérico, não o @username).
 # Configure no Railway como variável de ambiente, ex: ALLOWED_USER_IDS=123456789
@@ -225,7 +228,7 @@ def extract_facts(user_id, user_text):
     )
     try:
         data = {
-            "model": "llama-3.3-70b-versatile",
+            "model": GROQ_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 150,
             "temperature": 0.2,
@@ -353,7 +356,7 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
     
     try:
         data = {
-            "model": "llama-3.3-70b-versatile",
+            "model": GROQ_MODEL,
             "messages": messages,
             "max_tokens": 300,
             "temperature": 0.9
@@ -391,7 +394,7 @@ def generate_stage_transition_message(user_id, new_stage):
     )
     try:
         data = {
-            "model": "llama-3.3-70b-versatile",
+            "model": GROQ_MODEL,
             "messages": [{"role": "system", "content": prompt}],
             "max_tokens": 150,
             "temperature": 0.9,
