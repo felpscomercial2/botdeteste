@@ -24,16 +24,29 @@ _allowed_raw = os.environ.get("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS = {int(x.strip()) for x in _allowed_raw.split(",") if x.strip().isdigit()}
 VOICE_PRIMARY = "pt-BR-DonatoNeural"
 VOICE_SECONDARY = "pt-BR-AntonioNeural"
-RATE = "-5%"
+# Vozes masculinas gratuitas em pt-BR (mesmo motor neural da Microsoft, via Edge). O bot roda por essa
+# lista até uma funcionar, o que também dá variedade natural entre mensagens.
+VOICES_MASCULINAS = [
+    "pt-BR-DonatoNeural",
+    "pt-BR-AntonioNeural",
+    "pt-BR-FabioNeural",
+    "pt-BR-HumbertoNeural",
+    "pt-BR-JulioNeural",
+    "pt-BR-NicolauNeural",
+    "pt-BR-ValerioNeural",
+]
+# Faixas de variação de ritmo/tom para soar mais natural (evita o tom robótico de rate fixo)
+RATE_RANGE = (-10, 3)     # em %
+PITCH_RANGE = (-12, 12)   # em Hz
 FOTOS_PATH = "Fotos"
 
 # Estágios do relacionamento e limites de mensagens do usuário para progressão automática
 STAGES = ["conhecendo", "namorando", "noivos", "casados"]
 STAGE_THRESHOLDS = {
     "conhecendo": 0,
-    "namorando": 15,   # a partir de 15 mensagens do usuário
-    "noivos": 60,
-    "casados": 120,
+    "namorando": 30,   # a partir de 30 mensagens do usuário
+    "noivos": 110,
+    "casados": 220,
 }
 # A partir de quantas mensagens DENTRO da fase "namorando" o segredo da fralda pode ser revelado
 SECRET_REVEAL_AFTER = 10
@@ -238,14 +251,18 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
 
 # 5. Função de Voz (Corrigida e Reforçada)
 async def generate_voice(bot, chat_id, text, voice_name):
-    # Limpeza do texto para o TTS não engasgar
+    # Limpeza do texto para o TTS não engasgar (mantém ,.!? e reticências, que ajudam nas pausas)
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
     if not clean_text:
         return False
-        
+
+    # Uma pessoa real não fala com o mesmo ritmo/tom toda vez — varia a cada mensagem
+    rate = f"{random.randint(*RATE_RANGE):+d}%"
+    pitch = f"{random.randint(*PITCH_RANGE):+d}Hz"
+
     audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
     try:
-        communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
+        communicate = edge_tts.Communicate(clean_text, voice_name, rate=rate, pitch=pitch)
         await communicate.save(audio_file)
         
         # Pequena espera para garantir que o arquivo foi escrito
@@ -268,7 +285,8 @@ async def send_human_voice(bot, chat_id, text):
     await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
     # Tempo proporcional ao tamanho do texto
     await asyncio.sleep(min(len(text) * 0.05, 5))
-    
+
+    # Usa a voz principal do personagem; se falhar, tenta a secundária (mantém consistência do "Lucas")
     if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
         await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
 
