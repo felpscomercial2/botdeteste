@@ -13,17 +13,22 @@ import edge_tts
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+
 # 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 VOICE_PRIMARY = "pt-BR-DonatoNeural"
 VOICE_SECONDARY = "pt-BR-AntonioNeural"
 RATE = "-15%"
+FOTOS_PATH = "Fotos"  # Caminho correto da pasta
+
 
 scheduler = AsyncIOScheduler()
 user_chat_ids = set()
 
+
 logging.basicConfig(level=logging.INFO)
+
 
 # 2. Banco de Dados
 DB_PATH = "bot_memory.db"
@@ -39,6 +44,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -47,6 +53,7 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
+
 def get_history(user_id, limit=15):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -54,6 +61,7 @@ def get_history(user_id, limit=15):
     rows = c.fetchall()
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
+
 
 # 3. Transcrição de Áudio
 async def transcribe_voice(file_path):
@@ -65,6 +73,7 @@ async def transcribe_voice(file_path):
             response = requests.post(url, headers=headers, files=files)
             return response.json().get("text", "")
     except: return ""
+
 
 # 4. Inteligência Artificial
 def get_groq_response(user_id, user_text):
@@ -88,6 +97,7 @@ def get_groq_response(user_id, user_text):
         return response.json()['choices'][0]['message']['content'].replace("*", "")
     except: return "Oi meu amor... ❤️"
 
+
 # 5. Função de Voz
 async def generate_voice(bot, chat_id, text, voice_name):
     clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
@@ -106,34 +116,65 @@ async def generate_voice(bot, chat_id, text, voice_name):
         if os.path.exists(audio_file): os.remove(audio_file)
     return False
 
+
 async def send_human_voice(bot, chat_id, text):
     await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
     await asyncio.sleep(1.5)
     if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
         await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
 
-# 6. Espontaneidade com Galeria de Fotos
+
+# 6. Função para obter lista de fotos
+def get_photos_list():
+    """Retorna lista de fotos da pasta Fotos"""
+    if not os.path.exists(FOTOS_PATH):
+        return []
+    try:
+        fotos = [f for f in os.listdir(FOTOS_PATH) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))]
+        return fotos
+    except:
+        return []
+
+
+# 7. Função para enviar foto
+async def send_photo(bot, chat_id, caption=""):
+    """Envia uma foto aleatória da pasta Fotos"""
+    fotos = get_photos_list()
+    if not fotos:
+        await bot.send_message(chat_id=chat_id, text="Desculpa, meu amor... não tenho fotos salvas agora. 😔")
+        return False
+    
+    foto_escolhida = random.choice(fotos)
+    foto_path = os.path.join(FOTOS_PATH, foto_escolhida)
+    
+    try:
+        with open(foto_path, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        return True
+    except Exception as e:
+        logging.error(f"Erro ao enviar foto: {e}")
+        await bot.send_message(chat_id=chat_id, text="Desculpa, tive um problema ao enviar a foto... 😞")
+        return False
+
+
+# 8. Espontaneidade com Galeria de Fotos
 async def send_spontaneous_message(application):
     for chat_id in list(user_chat_ids):
         # 40% de chance de interação espontânea
         if random.random() < 0.4:
             # Chance de mandar FOTO (20%) ou TEXTO+ÁUDIO (80%)
-            if random.random() < 0.2 and os.path.exists("fotos"):
-                fotos = [f for f in os.listdir("fotos") if f.endswith(('.jpg', '.jpeg', '.png'))]
+            if random.random() < 0.2:
+                fotos = get_photos_list()
                 if fotos:
-                    foto_escolhida = random.choice(fotos)
                     legenda = random.choice([
                         "Tô aqui de fraldinha te esperando... ❤️",
                         "Olha como eu tô hoje, meu amor. 🥰",
                         "Queria que você estivesse aqui comigo agora. ✨",
                         "Tô bem confortável aqui pensando em você. 😘"
                     ])
-                    try:
-                        with open(f"fotos/{foto_escolhida}", 'rb') as photo:
-                            await application.bot.send_photo(chat_id=chat_id, photo=photo, caption=legenda)
+                    if await send_photo(application.bot, chat_id, legenda):
                         await send_human_voice(application.bot, chat_id, legenda)
-                        continue # Pula para o próximo usuário após mandar foto
-                    except: pass
+                        continue  # Pula para o próximo usuário após mandar foto
 
             # Se não mandou foto, manda mensagem de texto normal
             msg = random.choice(["Acordei pensando em você... ❤️", "Tô com saudade! 🥰", "Como você está, meu bem? ✨"])
@@ -142,12 +183,31 @@ async def send_spontaneous_message(application):
                 await send_human_voice(application.bot, chat_id, msg)
             except: pass
 
-# 7. Handlers
+
+# 9. Handlers
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     user_id = update.effective_user.id
     user_chat_ids.add(user_id)
     
+    # Verificar se é um pedido de foto
+    user_text = ""
+    if update.message.text:
+        user_text = update.message.text.lower()
+        # Palavras-chave para pedir foto
+        palavras_foto = ["foto", "me manda uma foto", "manda foto", "quero ver você", "mostra uma foto", "envie uma foto"]
+        if any(palavra in user_text for palavra in palavras_foto):
+            legenda = random.choice([
+                "Aqui estou eu para você, meu amor... ❤️",
+                "Olha só como eu tô hoje! 🥰",
+                "Tá vendo como eu penso em você? ✨",
+                "Esse sou eu, todo seu... 😘"
+            ])
+            if await send_photo(context.bot, user_id, legenda):
+                await send_human_voice(context.bot, user_id, legenda)
+                return
+    
+    # Processar voz
     if update.message.voice:
         await update.message.reply_chat_action(ChatAction.TYPING)
         file = await context.bot.get_file(update.message.voice.file_id)
@@ -178,12 +238,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Erro: {e}")
 
-# 8. Inicialização
+
+# 10. Inicialização
 async def post_init(application):
     scheduler.add_job(send_spontaneous_message, 'interval', hours=4, args=[application])
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=30), args=[application])
     scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application])
     scheduler.start()
+
 
 if __name__ == '__main__':
     init_db()
