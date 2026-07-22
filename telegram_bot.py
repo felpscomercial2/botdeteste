@@ -95,6 +95,11 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN message_count INTEGER DEFAULT 0")
     if "secret_revealed" not in existing_cols:
         c.execute("ALTER TABLE users ADD COLUMN secret_revealed INTEGER DEFAULT 0")
+    if "stage_announced" not in existing_cols:
+        # Rastreia até qual fase o pedido (namorar/noivar/casar) já foi REALMENTE entregue.
+        # Sem isso, o aviso só disparava uma vez no instante exato da virada de fase — se
+        # falhasse ali, nunca mais tentava de novo, mesmo com a fase já trocada no banco.
+        c.execute("ALTER TABLE users ADD COLUMN stage_announced TEXT DEFAULT 'conhecendo'")
     c.execute('SELECT user_id FROM users')
     rows = c.fetchall()
     for row in rows:
@@ -127,9 +132,30 @@ def get_user_state(user_id):
     stage, message_count, secret_revealed = row
     return (stage or "conhecendo", message_count or 0, secret_revealed or 0)
 
+def get_stage_announced(user_id):
+    """Retorna até qual fase o pedido (namorar/noivar/casar) já foi realmente entregue."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT stage_announced FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row is None or row[0] is None:
+        return "conhecendo"
+    return row[0]
+
+def mark_stage_announced(user_id, stage):
+    """Marca que o pedido de virada pra essa fase já foi enviado com sucesso."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET stage_announced = ? WHERE user_id = ?", (stage, user_id))
+    conn.commit()
+    conn.close()
+
 def advance_user_state(user_id):
     """Incrementa o contador de mensagens do usuário e recalcula o estágio.
-    Retorna (stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now)."""
+    Retorna (stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now).
+    NÃO marca secret_revealed no banco — isso só acontece em mark_secret_revealed(), chamada
+    pelo handler depois que a mensagem de revelação for realmente entregue com sucesso."""
     stage, message_count, secret_revealed = get_user_state(user_id)
     message_count += 1
 
@@ -154,13 +180,28 @@ def advance_user_state(user_id):
         "UPDATE users SET stage = ?, message_count = ? WHERE user_id = ?",
         (new_stage, message_count, user_id)
     )
-    if should_reveal_secret_now:
-        c.execute("UPDATE users SET secret_revealed = 1 WHERE user_id = ?", (user_id,))
-        secret_revealed = 1
     conn.commit()
     conn.close()
 
     return (new_stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now)
+
+def mark_secret_revealed(user_id):
+    """Marca o segredo como revelado no banco. Só deve ser chamada depois que a mensagem
+    de revelação foi realmente gerada e enviada com sucesso (não em caso de fallback)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET secret_revealed = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def unmark_secret_revealed(user_id):
+    """Desfaz o secret_revealed (pra corrigir contas que ficaram marcadas como 'revelado'
+    sem o Lucas ter realmente dito nada, por causa do bug antigo). Mantém fase e contador."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET secret_revealed = 0 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
 def reset_user_state(user_id, wipe_history=False):
     """Zera fase/contador/segredo do usuário (pra testar sem precisar mandar 30+ mensagens).
@@ -168,7 +209,8 @@ def reset_user_state(user_id, wipe_history=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "UPDATE users SET stage = 'conhecendo', message_count = 0, secret_revealed = 0 WHERE user_id = ?",
+        "UPDATE users SET stage = 'conhecendo', message_count = 0, secret_revealed = 0, "
+        "stage_announced = 'conhecendo' WHERE user_id = ?",
         (user_id,)
     )
     if wipe_history:
@@ -219,9 +261,11 @@ def extract_facts(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     prompt = (
-        "Extraia fatos NOVOS, específicos e duráveis sobre a pessoa a partir da mensagem abaixo "
-        "(nome, aniversário, gostos, trabalho, familiares, coisas importantes que ela contou). "
-        "Ignore desabafos passageiros, humor do momento ou small talk sem conteúdo factual. "
+        "Extraia fatos NOVOS, específicos e duráveis sobre a pessoa a partir da mensagem abaixo: "
+        "nome, aniversário, gostos, trabalho, familiares, animais de estimação, e também segredos, "
+        "medos, experiências marcantes ou coisas pessoais importantes que ela decidiu compartilhar — "
+        "mesmo que sejam emocionais e não puramente factuais, se forem algo que valha a pena lembrar depois. "
+        "Ignore só desabafos realmente passageiros (reclamação do trânsito, cansaço do dia) e small talk sem conteúdo. "
         "Responda APENAS com uma lista, um fato por linha, cada linha curta e objetiva. "
         "Se não houver nenhum fato relevante, responda apenas com a palavra: nenhum.\n\n"
         f"Mensagem: {user_text}"
@@ -304,6 +348,10 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "bobo/tímido em momentos mais íntimos. A intensidade emocional cresce com a fase do relacionamento — mais contida "
         "e sutil em 'conhecendo', mais aberta e intensa em 'namorando', 'noivos' e 'casados'. Evite respostas emocionalmente "
         "planas ou genéricas; cada emoção deve parecer reação real ao que foi dito, não um clichê solto."
+        "\n\nAPELIDOS CARINHOSOS: se ela/ele te chamar de 'gatinho', 'bebê', 'amor', 'meu bem' ou qualquer "
+        "apelido parecido, entenda que é um apelido carinhoso PRA VOCÊ (Lucas) — não interprete como se "
+        "existisse um gato, um bebê ou outra pessoa/animal real de verdade. Responda como alguém que gostou "
+        "de ganhar aquele apelido, sem se confundir sobre quem está sendo chamado."
     )
 
     if stage == "conhecendo":
@@ -683,13 +731,16 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
         return
     stage, message_count, secret_revealed = get_user_state(user_id)
+    stage_announced = get_stage_announced(user_id)
+    pedido_pendente = stage != "conhecendo" and stage != stage_announced
     facts = get_facts(user_id)
     facts_txt = "\n".join(f"- {f}" for f in facts) if facts else "(nenhum ainda)"
     texto = (
         f"📊 Status\n"
         f"Fase: {stage}\n"
         f"Mensagens contadas: {message_count}\n"
-        f"Segredo revelado: {'sim' if secret_revealed else 'não'}\n\n"
+        f"Segredo revelado: {'sim' if secret_revealed else 'não'}\n"
+        f"Pedido de fase pendente: {'sim (vai tentar de novo na próxima mensagem)' if pedido_pendente else 'não'}\n\n"
         f"Fatos salvos:\n{facts_txt}"
     )
     await update.message.reply_text(texto)
@@ -707,6 +758,35 @@ async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Fase, contador e segredo zerados (histórico e fatos mantidos). "
             "Use /reset tudo pra apagar tudo também. 🔄"
         )
+
+async def handle_segredo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Corrige o caso em que secret_revealed ficou marcado como 'sim' no banco sem o Lucas
+    ter realmente contado (bug antigo). Zera só essa flag, mantendo fase e contador —
+    assim, se as mensagens já baterem o limite, ele revela de verdade na próxima mensagem."""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    unmark_secret_revealed(user_id)
+    await update.message.reply_text(
+        "Segredo desmarcado. Se as mensagens já baterem o suficiente, ele deve revelar "
+        "de verdade na próxima resposta. 🔄"
+    )
+
+async def handle_lembrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Salva manualmente um fato na tabela de fatos, sem depender da IA decidir se é
+    importante o suficiente. Uso: /lembrar <o que você quer que ele nunca esqueça>."""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+        return
+    fact_text = " ".join(context.args).strip() if context.args else ""
+    if not fact_text:
+        await update.message.reply_text(
+            "Manda assim: /lembrar <o que você quer que ele nunca esqueça>\n"
+            "Ex: /lembrar Meu aniversário é em outubro"
+        )
+        return
+    add_fact(user_id, fact_text)
+    await update.message.reply_text(f"Guardado. Ele vai lembrar disso: \"{fact_text}\" ✅")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -789,6 +869,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     get_groq_response, user_id, user_text, stage, secret_revealed, should_reveal_secret_now
                 )
                 save_message(user_id, "model", full_response)
+                # Só marca o segredo como revelado se a Groq realmente respondeu com sucesso
+                # nesta mensagem — antes isso era marcado antes de saber se a resposta saía,
+                # o que podia deixar o segredo "revelado" no banco sem o Lucas ter dito nada.
+                if should_reveal_secret_now:
+                    mark_secret_revealed(user_id)
             except Exception as e:
                 logging.error(f"Groq falhou após retries: {e}")
                 full_response = "Oi meu amor... desculpa, tive um pequeno soluço, mas tô aqui pra você. ❤️"
@@ -805,14 +890,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if random.random() < AUDIO_CHANCE:
             await send_human_voice(context.bot, user_id, full_response)
 
-        # Mensagem extra e discreta quando a fase do relacionamento muda de patamar
-        if stage_just_changed and stage != "conhecendo":
+        # Mensagem de pedido (namorar/noivar/casar) quando a fase muda de patamar.
+        # Em vez de disparar só uma vez no instante exato da virada (o que perdia o pedido
+        # pra sempre se algo falhasse ali), compara com o que já foi REALMENTE entregue e
+        # continua tentando em toda mensagem seguinte até conseguir.
+        if stage != "conhecendo" and stage != get_stage_announced(user_id):
             aviso = await asyncio.to_thread(generate_stage_transition_message, user_id, stage)
             if aviso:
                 await asyncio.sleep(random.uniform(1.5, 3))
                 await update.message.reply_text(aviso)
                 # Momento importante (pedido de namoro/noivado/casamento) — aqui mantém o áudio sempre
                 await send_human_voice(context.bot, user_id, aviso)
+                mark_stage_announced(user_id, stage)
 
     except Exception as e:
         # Antes, um erro aqui só ia pro log e a mensagem simplesmente sumia (o "digitando"
@@ -846,5 +935,7 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(CommandHandler("status", handle_status))
     application.add_handler(CommandHandler("reset", handle_reset))
+    application.add_handler(CommandHandler("segredo", handle_segredo))
+    application.add_handler(CommandHandler("lembrar", handle_lembrar))
     application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     application.run_polling(drop_pending_updates=True)
