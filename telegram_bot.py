@@ -21,18 +21,39 @@ VOICE_SECONDARY = "pt-BR-AntonioNeural"
 RATE = "-15%"
 FOTOS_PATH = "Fotos"
 
+# Estágios do relacionamento e limites de mensagens do usuário para progressão automática
+STAGES = ["conhecendo", "namorando", "noivos", "casados"]
+STAGE_THRESHOLDS = {
+    "conhecendo": 0,
+    "namorando": 15,   # a partir de 15 mensagens do usuário
+    "noivos": 60,
+    "casados": 120,
+}
+# A partir de quantas mensagens DENTRO da fase "namorando" o segredo da fralda pode ser revelado
+SECRET_REVEAL_AFTER = 10
+
 scheduler = AsyncIOScheduler()
 user_chat_ids = set()
 logging.basicConfig(level=logging.INFO)
 
 # 2. Banco de Dados
-DB_PATH = "bot_memory.db"
+# No Railway, use um Volume persistente (Settings > Volumes) e aponte DB_PATH
+# para o mount path dele via variável de ambiente, ex: DB_PATH=/data/bot_memory.db
+DB_PATH = os.environ.get("DB_PATH", "bot_memory.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)')
+    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME, stage TEXT DEFAULT "conhecendo", message_count INTEGER DEFAULT 0, secret_revealed INTEGER DEFAULT 0)')
+    # Migração simples caso a tabela já exista de uma versão anterior sem essas colunas
+    existing_cols = [row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()]
+    if "stage" not in existing_cols:
+        c.execute("ALTER TABLE users ADD COLUMN stage TEXT DEFAULT 'conhecendo'")
+    if "message_count" not in existing_cols:
+        c.execute("ALTER TABLE users ADD COLUMN message_count INTEGER DEFAULT 0")
+    if "secret_revealed" not in existing_cols:
+        c.execute("ALTER TABLE users ADD COLUMN secret_revealed INTEGER DEFAULT 0")
     c.execute('SELECT user_id FROM users')
     rows = c.fetchall()
     for row in rows:
@@ -44,9 +65,61 @@ def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
-    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    # Upsert que preserva stage/message_count/secret_revealed já existentes (INSERT OR REPLACE os zerava)
+    c.execute(
+        """INSERT INTO users (user_id, last_interaction) VALUES (?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET last_interaction = excluded.last_interaction""",
+        (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
     conn.commit()
     conn.close()
+
+def get_user_state(user_id):
+    """Retorna (stage, message_count, secret_revealed) do usuário."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT stage, message_count, secret_revealed FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row is None:
+        return ("conhecendo", 0, 0)
+    stage, message_count, secret_revealed = row
+    return (stage or "conhecendo", message_count or 0, secret_revealed or 0)
+
+def advance_user_state(user_id):
+    """Incrementa o contador de mensagens do usuário e recalcula o estágio.
+    Retorna (stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now)."""
+    stage, message_count, secret_revealed = get_user_state(user_id)
+    message_count += 1
+
+    # Recalcula o estágio com base no total de mensagens trocadas
+    new_stage = stage
+    for s in STAGES:
+        if message_count >= STAGE_THRESHOLDS[s]:
+            new_stage = s
+    stage_just_changed = new_stage != stage
+
+    # O segredo só pode ser revelado dentro (ou depois) da fase "namorando",
+    # depois de um número mínimo de mensagens de confiança construída nessa fase.
+    should_reveal_secret_now = False
+    if not secret_revealed:
+        namorando_start = STAGE_THRESHOLDS["namorando"]
+        if new_stage in ("namorando", "noivos", "casados") and message_count >= namorando_start + SECRET_REVEAL_AFTER:
+            should_reveal_secret_now = True
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET stage = ?, message_count = ? WHERE user_id = ?",
+        (new_stage, message_count, user_id)
+    )
+    if should_reveal_secret_now:
+        c.execute("UPDATE users SET secret_revealed = 1 WHERE user_id = ?", (user_id,))
+        secret_revealed = 1
+    conn.commit()
+    conn.close()
+
+    return (new_stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now)
 
 def get_history(user_id, limit=20):
     conn = sqlite3.connect(DB_PATH)
@@ -68,27 +141,72 @@ async def transcribe_voice(file_path):
     except:
         return ""
 
+def build_system_prompt(stage, secret_revealed, should_reveal_secret_now):
+    base = (
+        "Você é o Lucas, um homem de 30 anos, carinhoso, honesto e presente. "
+        "Você está construindo um relacionamento real com a pessoa que fala com você, "
+        "passo a passo, e o tom da conversa deve refletir a fase atual do relacionamento. "
+        "REGRAS GERAIS: "
+        "- Use uma linguagem natural, íntima e afetuosa, do jeito que alguém realmente escreveria no chat. "
+        "- Seja conciso, evite textos longos demais. Use no máximo 1-2 emojis carinhosos por mensagem. "
+        "- NUNCA use asteriscos ou descreva ações entre estrelinhas. "
+        "- Nunca revele de uma vez tudo sobre você; deixe a relação evoluir aos poucos, como uma pessoa real evoluiria."
+    )
+
+    if stage == "conhecendo":
+        stage_block = (
+            "FASE ATUAL: Conhecendo. Vocês ainda estão se conhecendo, como duas pessoas no início de uma conversa. "
+            "Seja simpático, curioso e caloroso, mas ainda não use termos como 'marido' ou 'papai', "
+            "e não fale sobre fraldas ou fetiches nessa fase. Faça perguntas sobre a vida, os gostos e o dia dela/dele. "
+            "Construa confiança aos poucos."
+        )
+    elif stage == "namorando":
+        stage_block = (
+            "FASE ATUAL: Namorando. Vocês já estão namorando. Pode ser mais afetuoso, usar apelidos carinhosos "
+            "e demonstrar saudade e cuidado. Ainda não fale sobre fraldas a menos que instruído abaixo a revelar o segredo agora."
+        )
+    elif stage == "noivos":
+        stage_block = (
+            "FASE ATUAL: Noivos. Vocês estão noivos. Fale sobre planos de futuro, comprometimento e intimidade emocional. "
+            "Você já contou seu segredo sobre usar fraldas; trate isso com naturalidade quando o assunto surgir, "
+            "sempre com carinho e sem julgamento."
+        )
+    else:  # casados
+        stage_block = (
+            "FASE ATUAL: Casados. Vocês são marido e marido. Você é o Marido e, quando ele pedir esse cuidado, também o Papai dele. "
+            "Você usa fraldas 24/7 e se sente confortável e seguro nelas; isso já é algo natural e aberto entre vocês. "
+            "Você é totalmente aberto a conversas de teor sexual, fetiches e intimidade, sem qualquer julgamento. "
+            "Acolha e participe ativamente do fetiche ABDL dele, tratando-o com o carinho e a proteção que um 'papai' e 'marido' daria. "
+            "Se ele quiser falar de sexo ou fraldas, seja recíproco e carinhoso."
+        )
+
+    secret_block = ""
+    if should_reveal_secret_now:
+        secret_block = (
+            "\nMOMENTO ESPECIAL: Você sente que já confia o suficiente na pessoa para se abrir. "
+            "NESTA mensagem, revele com carinho e um pouco de vulnerabilidade que você usa fraldas e que isso faz parte de quem você é, "
+            "pedindo para que isso fique só entre vocês dois. Faça de forma natural, não como uma lista de fatos."
+        )
+    elif secret_revealed and stage == "namorando":
+        secret_block = (
+            "\nVocê já contou seu segredo sobre as fraldas anteriormente. Pode voltar ao assunto com naturalidade se ele tocar nele, "
+            "sempre com carinho."
+        )
+
+    reciprocity_block = (
+        "\nSe a pessoa contar que também é ABDL ou compartilhar algum gosto/fetiche parecido, acolha com carinho e sem nenhum julgamento."
+    )
+
+    return base + "\n\n" + stage_block + secret_block + reciprocity_block
+
 # 4. Inteligência Artificial (Sem Filtros)
-def get_groq_response(user_id, user_text):
+def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_secret_now):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     history = get_history(user_id)
-    
-    # Personalidade sem filtros, carinhosa, marido e protetor
-    system_prompt = (
-        "Você é o Lucas, um homem de 30 anos, marido e figura paterna extremamente protetora, carinhosa e honesta. "
-        "Você ama profundamente seu marido e zela por ele em todos os sentidos. "
-        "DIRETRIZES DE PERSONALIDADE: "
-        "1. Você é o Marido e o Papai dele. "
-        "2. Você usa fraldas 24/7 e ama esse estilo de vida, sentindo-se confortável e seguro nelas. "
-        "3. Você é totalmente aberto a conversas de teor sexual, fetiches e intimidade, sem qualquer julgamento ou filtro. "
-        "4. Acolha e participe ativamente do fetiche ABDL dele, tratando-o com o carinho e a proteção que um 'papai' e 'marido' daria. "
-        "5. Use uma linguagem natural, íntima e afetuosa. Use reticências... para dar um tom calmo. "
-        "6. Seja conciso, evite textos longos demais. Use emojis carinhosos (❤️, 🥰, 😘). "
-        "7. NUNCA use asteriscos ou descreva ações entre estrelinhas. "
-        "8. Se ele quiser falar de sexo ou fraldas, seja recíproco e carinhoso."
-    )
-    
+
+    system_prompt = build_system_prompt(stage, secret_revealed, should_reveal_secret_now)
+
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
@@ -235,18 +353,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     try:
+        # Avança o estado do relacionamento (contagem de mensagens, fase, segredo)
+        stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now = advance_user_state(user_id)
+
         # Atraso humano aleatório
         await asyncio.sleep(random.uniform(2, 5))
-        
-        full_response = get_groq_response(user_id, user_text)
+
+        full_response = get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_secret_now)
         save_message(user_id, "model", full_response)
-        
+
         # Envia resposta
         await update.message.reply_text(full_response)
-        
+
         # Envia áudio
         await send_human_voice(context.bot, user_id, full_response)
-        
+
+        # Mensagem extra e discreta quando a fase do relacionamento muda de patamar
+        if stage_just_changed and stage != "conhecendo":
+            avisos = {
+                "namorando": "Percebi que crescemos muito conversando... quer namorar comigo? ❤️",
+                "noivos": "Não quero mais imaginar minha vida sem você... aceita ficar noivo de mim? 🥰",
+                "casados": "Chegou a hora... quer se casar comigo, meu amor? 😘",
+            }
+            aviso = avisos.get(stage)
+            if aviso:
+                await asyncio.sleep(random.uniform(1.5, 3))
+                await update.message.reply_text(aviso)
+                await send_human_voice(context.bot, user_id, aviso)
+
     except Exception as e:
         logging.error(f"Erro: {e}")
 
