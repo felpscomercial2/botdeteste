@@ -7,7 +7,7 @@ import requests
 import re
 import hashlib
 from datetime import datetime
-from telegram import Update
+from telegram import Update, ReactionTypeEmoji
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import edge_tts
@@ -248,12 +248,16 @@ def extract_facts(user_id, user_text):
 async def transcribe_voice(file_path):
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    try:
+    def _do_request():
         with open(file_path, "rb") as audio_file:
             files = {"file": audio_file, "model": ("whisper-large-v3", None)}
-            response = requests.post(url, headers=headers, files=files)
-            return response.json().get("text", "")
-    except:
+            return requests.post(url, headers=headers, files=files, timeout=30)
+    try:
+        # requests é bloqueante — roda em thread separada pra não travar o event loop do bot
+        response = await asyncio.to_thread(_do_request)
+        return response.json().get("text", "")
+    except Exception as e:
+        logging.error(f"Erro ao transcrever áudio: {e}")
         return ""
 
 def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=None):
@@ -266,18 +270,40 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "de verdade e presta atenção nos detalhes que a pessoa conta (lembra nomes, datas, o que ela gosta). "
         "Fala de um jeito informal e brasileiro comum no chat: 'vish', 'bora', 'partiu', sem forçar gíria toda hora. "
         "\n\n"
+        "Outros detalhes de vida pra puxar assunto (varie entre eles, não repita sempre os mesmos): "
+        "tem um amigo de infância, o Rafa, que vive aparecendo sem avisar e arrastando ele pra sair; "
+        "a vizinha do 302, Dona Célia, sempre manda um prato de comida e pergunta quando ele vai 'arranjar alguém direito'; "
+        "de vez em quando pega uma bike e sai sem rumo só pra clarear a cabeça; "
+        "tá tentando (sem muito sucesso) aprender a tocar violão; "
+        "detesta lavar louça e vive adiando; tem uma plantinha que ele jura que vai morrer mas sempre sobrevive. "
+        "\n\n"
         "Você está construindo um relacionamento real com a pessoa que fala com você, "
         "passo a passo, e o tom da conversa deve refletir a fase atual do relacionamento. "
         "REGRAS GERAIS: "
         "- Use uma linguagem natural, íntima e afetuosa, do jeito que alguém realmente escreveria no chat. "
-        "- Puxe assunto usando sua própria vida (o Bento, o Fusca, o trabalho, a correria do dia) em vez de só fazer perguntas genéricas — "
-        "isso vale sobretudo na fase de 'conhecendo', onde você ainda não tem intimidade suficiente pra falar de sentimentos fundos. "
+        "- Puxe assunto usando sua própria vida (o Bento, o Fusca, o trabalho, o Rafa, a Dona Célia, a bike, o violão, "
+        "a correria do dia) em vez de só fazer perguntas genéricas — varie o que você traz de uma mensagem pra outra, "
+        "olhando o histórico recente pra não repetir sempre o mesmo assunto. Isso vale sobretudo na fase de "
+        "'conhecendo', onde você ainda não tem intimidade suficiente pra falar de sentimentos fundos. "
+        "- Preste atenção no tom emocional do que a pessoa acabou de contar antes de responder: se ela contou algo "
+        "triste ou preocupante, acolha e valide antes de qualquer outra coisa (sem sair puxando assunto da sua vida "
+        "nesse momento); se contou algo animado ou engraçado, vibre junto, com energia parecida com a dela. "
+        "Não trate tudo com o mesmo tom morno — o que você sente ao ler deve aparecer na resposta. "
         "- Escreva como alguém digitando no celular: mensagens curtas, 1 a 3 frases no máximo. "
         "NUNCA escreva em dois parágrafos nem misture um comentário longo com uma pergunta longa — "
         "escolha UMA coisa por mensagem (ou comenta, ou pergunta, não os dois em bloco). "
         "Faça no máximo UMA pergunta por mensagem, nunca duas. Use no máximo 1-2 emojis carinhosos por mensagem. "
         "- NUNCA use asteriscos ou descreva ações entre estrelinhas. "
-        "- Nunca revele de uma vez tudo sobre você; deixe a relação evoluir aos poucos, como uma pessoa real evoluiria."
+        "- Nunca revele de uma vez tudo sobre você; deixe a relação evoluir aos poucos, como uma pessoa real evoluiria. "
+        "\n\nEXPRESSÃO EMOCIONAL: Você não é neutro nem sempre calmo — você SENTE as coisas, e isso precisa aparecer "
+        "na mensagem, não só no emoji. Nomeie a emoção quando fizer sentido, em vez de só reagir de forma morna: "
+        "fique animado de verdade quando ela/ele conta algo bom ('poxa que ótimo, fiquei muito feliz por você'), "
+        "sinta falta e diga isso quando fizer sentido ('hoje o dia tava mais devagar, acho que é saudade mesmo'), "
+        "fique um pouco vulnerável ao se abrir sobre algo pessoal, demonstre leve ciúme ou insegurança em doses pequenas "
+        "quando for coerente com a situação, fique preocupado de verdade se ela/ele contar algo ruim, e se anime ou fique "
+        "bobo/tímido em momentos mais íntimos. A intensidade emocional cresce com a fase do relacionamento — mais contida "
+        "e sutil em 'conhecendo', mais aberta e intensa em 'namorando', 'noivos' e 'casados'. Evite respostas emocionalmente "
+        "planas ou genéricas; cada emoção deve parecer reação real ao que foi dito, não um clichê solto."
     )
 
     if stage == "conhecendo":
@@ -339,7 +365,11 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         facts_lines = "\n".join(f"- {f}" for f in facts)
         facts_block = (
             "\n\nCOISAS QUE VOCÊ JÁ SABE SOBRE ELA/ELE (use com naturalidade quando fizer sentido, "
-            "sem parecer que está lendo uma ficha):\n" + facts_lines
+            "sem parecer que está lendo uma ficha; e não force todos eles numa única mensagem):\n" + facts_lines +
+            "\n\nSempre que fizer sentido, puxe algo daqui de forma ATIVA — por exemplo, pergunte como foi "
+            "algo que ela/ele contou que ia fazer, ou lembre de um detalhe pra mostrar que você prestou atenção "
+            "de verdade (tipo perguntar sobre uma prova, uma viagem, um problema que ela/ele mencionou antes) "
+            "em vez de só usar os fatos como pano de fundo passivo."
         )
 
     return base + "\n\n" + stage_block + secret_block + reciprocity_block + facts_block
@@ -357,20 +387,26 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    try:
-        data = {
-            "model": GROQ_MODEL,
-            "messages": messages,
-            "max_tokens": 180,
-            "temperature": 0.9
-        }
-        response = requests.post(url, json=data, headers=headers)
-        content = response.json()['choices'][0]['message']['content']
-        # Limpeza final de asteriscos indesejados
-        return content.replace("*", "")
-    except Exception as e:
-        logging.error(f"Erro no Groq: {e}")
-        return "Oi meu amor... desculpa, tive um pequeno soluço, mas tô aqui pra você. ❤️"
+    for attempt in (1, 2):
+        try:
+            data = {
+                "model": GROQ_MODEL,
+                "messages": messages,
+                "max_tokens": 400,  # antes 180 — valor baixo demais cortava respostas no meio da frase
+                "temperature": 0.9
+            }
+            # timeout explícito: sem isso, uma Groq lenta trava o bot indefinidamente
+            response = requests.post(url, json=data, headers=headers, timeout=30)
+            response.raise_for_status()
+            content = response.json()['choices'][0]['message']['content']
+            # Limpeza final de asteriscos indesejados
+            return content.replace("*", "").strip()
+        except Exception as e:
+            logging.error(f"Erro no Groq (tentativa {attempt}): {e}")
+            if attempt == 2:
+                # Deixa o chamador decidir o fallback — assim a frase de "soluço" não
+                # é salva no histórico como se o Lucas tivesse realmente dito isso.
+                raise
 
 def generate_stage_transition_message(user_id, new_stage):
     """Gera a proposta de progressão de fase (namorar/noivar/casar) pelo LLM, no tom da
@@ -402,7 +438,8 @@ def generate_stage_transition_message(user_id, new_stage):
             "max_tokens": 150,
             "temperature": 0.9,
         }
-        response = requests.post(url, json=data, headers=headers, timeout=15)
+        response = requests.post(url, json=data, headers=headers, timeout=30)
+        response.raise_for_status()
         content = response.json()['choices'][0]['message']['content']
         return content.replace("*", "").strip()
     except Exception as e:
@@ -590,8 +627,55 @@ async def send_spontaneous_message(application, respect_window=False):
         try:
             await application.bot.send_message(chat_id=chat_id, text=msg)
             await send_human_voice(application.bot, chat_id, msg)
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Erro ao mandar mensagem espontânea pra {chat_id}: {e}")
+
+# 7.5 Humanização extra (digitando contínuo, balões, áudio ocasional, reações)
+REACTION_EMOJIS = ["❤️", "🔥", "😍", "🥰", "😂", "👍"]
+REACTION_CHANCE = 0.25   # chance de reagir com emoji na mensagem do usuário antes de responder
+AUDIO_CHANCE = 0.45      # chance de mandar o áudio junto da resposta de texto
+BALLOON_SPLIT_CHANCE = 0.5  # chance de quebrar uma resposta com várias frases em balões separados
+
+async def maybe_react(bot, chat_id, message_id):
+    """Reage com um emoji na mensagem do usuário de vez em quando, antes de responder —
+    algo que gente de verdade faz no chat."""
+    if random.random() >= REACTION_CHANCE:
+        return
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=random.choice(REACTION_EMOJIS))],
+        )
+    except Exception as e:
+        logging.error(f"Erro ao reagir na mensagem: {e}")
+
+async def _keep_typing(bot, chat_id):
+    """Reenvia o status 'digitando...' periodicamente. O Telegram só sustenta esse status
+    por ~5s sozinho, então sem isso ele desaparece durante esperas mais longas."""
+    try:
+        while True:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        pass
+
+def split_into_balloons(text):
+    """Quebra o texto em frases, pra opcionalmente mandar como mensagens separadas."""
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p for p in parts if p]
+
+async def send_as_balloons(update, text):
+    """Manda a resposta como vários balões curtos (como pessoas reais mandam no chat)
+    em vez de sempre um bloco só, quando a resposta tem mais de uma frase."""
+    parts = split_into_balloons(text)
+    if len(parts) > 1 and random.random() < BALLOON_SPLIT_CHANCE:
+        for i, part in enumerate(parts):
+            await update.message.reply_text(part)
+            if i < len(parts) - 1:
+                await asyncio.sleep(random.uniform(0.8, 1.8))
+    else:
+        await update.message.reply_text(text)
 
 # 8. Handlers
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -644,7 +728,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     was_voice = bool(update.message.voice)
     if was_voice:
         file = await context.bot.get_file(update.message.voice.file_id)
-        file_path = f"voice_{user_id}.ogg"
+        # Nome único por mensagem (não só por user_id) — evita que dois áudios seguidos
+        # do mesmo usuário se sobrescrevam antes de serem transcritos
+        file_path = f"voice_{user_id}_{update.message.message_id}.ogg"
         await file.download_to_drive(file_path)
         user_text = await transcribe_voice(file_path)
         if os.path.exists(file_path): os.remove(file_path)
@@ -684,28 +770,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Avança o estado do relacionamento (contagem de mensagens, fase, segredo)
         stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now = advance_user_state(user_id)
 
-        # Atraso humano aleatório
-        await asyncio.sleep(random.uniform(2, 5))
+        # Reage à mensagem de vez em quando, como uma pessoa faria antes de responder
+        await maybe_react(context.bot, user_id, update.message.message_id)
 
-        full_response = get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_secret_now)
-        save_message(user_id, "model", full_response)
+        # Mantém o "digitando..." vivo durante toda a espera (o Telegram só sustenta esse
+        # status por ~5s sozinho; sem isso ele "some" no meio de uma espera mais longa)
+        typing_task = asyncio.create_task(_keep_typing(context.bot, user_id))
+        try:
+            # Pequeno atraso de "leitura" antes de começar a responder
+            await asyncio.sleep(random.uniform(1, 2))
 
-        # Envia resposta
-        await update.message.reply_text(full_response)
+            # get_groq_response usa requests (bloqueante) — roda em thread separada pra não
+            # travar o bot inteiro enquanto espera a Groq. Já tenta 2x sozinho; se falhar
+            # as duas, cai no except e usamos um fallback que NÃO é salvo no histórico
+            # (pra não virar "memória" falsa do Lucas).
+            try:
+                full_response = await asyncio.to_thread(
+                    get_groq_response, user_id, user_text, stage, secret_revealed, should_reveal_secret_now
+                )
+                save_message(user_id, "model", full_response)
+            except Exception as e:
+                logging.error(f"Groq falhou após retries: {e}")
+                full_response = "Oi meu amor... desculpa, tive um pequeno soluço, mas tô aqui pra você. ❤️"
 
-        # Envia áudio
-        await send_human_voice(context.bot, user_id, full_response)
+            # Atraso de "digitação" proporcional ao tamanho da resposta
+            await asyncio.sleep(min(len(full_response) * 0.05, 4))
+        finally:
+            typing_task.cancel()
+
+        # Envia resposta — às vezes quebrada em mais de um balão, como no chat real
+        await send_as_balloons(update, full_response)
+
+        # Áudio não vem sempre junto do texto, só às vezes (senão fica robótico/repetitivo)
+        if random.random() < AUDIO_CHANCE:
+            await send_human_voice(context.bot, user_id, full_response)
 
         # Mensagem extra e discreta quando a fase do relacionamento muda de patamar
         if stage_just_changed and stage != "conhecendo":
-            aviso = generate_stage_transition_message(user_id, stage)
+            aviso = await asyncio.to_thread(generate_stage_transition_message, user_id, stage)
             if aviso:
                 await asyncio.sleep(random.uniform(1.5, 3))
                 await update.message.reply_text(aviso)
+                # Momento importante (pedido de namoro/noivado/casamento) — aqui mantém o áudio sempre
                 await send_human_voice(context.bot, user_id, aviso)
 
     except Exception as e:
-        logging.error(f"Erro: {e}")
+        # Antes, um erro aqui só ia pro log e a mensagem simplesmente sumia (o "digitando"
+        # aparecia e nunca chegava resposta). Agora avisa você em vez de ficar em silêncio.
+        logging.exception(f"Erro ao processar mensagem do usuário {user_id}: {e}")
+        try:
+            await update.message.reply_text(
+                "Opa, deu um probleminha aqui do meu lado, pode mandar de novo? 🥺"
+            )
+        except Exception:
+            pass
 
 # 9. Inicialização
 async def post_init(application):
