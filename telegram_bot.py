@@ -38,6 +38,10 @@ STAGE_THRESHOLDS = {
 # A partir de quantas mensagens DENTRO da fase "namorando" o segredo da fralda pode ser revelado
 SECRET_REVEAL_AFTER = 10
 
+# Configuração das mensagens espontâneas
+SPONTANEOUS_CHANCE = 0.3      # chance de mandar algo em cada ciclo do scheduler
+SPONTANEOUS_PHOTO_CHANCE = 0.35  # dentro de um ciclo que vai mandar algo, chance de ser foto
+
 scheduler = AsyncIOScheduler()
 user_chat_ids = set()
 logging.basicConfig(level=logging.INFO)
@@ -293,36 +297,79 @@ async def send_photo(bot, chat_id, caption=""):
         return False
 
 # 7. Espontaneidade
+LEGENDAS_FOTO_NEUTRAS = [
+    "Tô aqui pensando em você... ❤️",
+    "Olha como eu tô hoje... 🥰",
+    "Queria você aqui do meu lado agora... 😘",
+    "Tô bem tranquilo aqui, só faltava você. ✨",
+]
+LEGENDAS_FOTO_ABDL_NOIVOS = [
+    "Fiquei um tempinho de fraldinha, pensando em você... ❤️",
+    "Olha só como eu tô, meu amor... 🥰",
+    "Queria muito você aqui do meu lado agora... 😘",
+    "Tô bem confortável aqui, só faltava você. ✨",
+]
+LEGENDAS_FOTO_ABDL_CASADOS = [
+    "Tô aqui de fraldinha pensando em você, meu bem... ❤️",
+    "Olha como seu marido tá hoje... 🥰",
+    "Queria você aqui no meu colo agora... 😘",
+    "Tô bem confortável aqui, só faltava você. ✨",
+]
+LEGENDAS_FOTO_MOLHADA = [
+    "Acabei de sentir a fralda mais pesadinha... foi bom deixar acontecer. 🥰",
+    "Já tá bem molhadinha aqui... queria seu colo agora. ❤️",
+    "Deixei acontecer sem pressa nenhuma... tô bem tranquilo. ✨",
+]
+MSGS_TEXTO_NEUTRAS = [
+    "Acordei pensando em você, meu amor... ❤️",
+    "Tô com muita saudade! 🥰",
+    "Como você tá hoje, meu bem? Tá se cuidando? ✨",
+    "Só passei pra dizer que gosto muito de você. 😘",
+]
+MSGS_TEXTO_INTIMAS = [
+    "Acordei pensando em você, meu amor... ❤️",
+    "Tô com muita saudade do meu garoto! 🥰",
+    "Como você tá hoje, meu bem? Tá se cuidando? ✨",
+    "Só passei pra dizer que te amo muito. 😘",
+    "Hum... tava aqui lembrando do seu cheirinho. ❤️",
+]
+
+def escolher_legenda_foto(stage, secret_revealed):
+    pode_falar_de_fralda = bool(secret_revealed) and stage in ("namorando", "noivos", "casados")
+    if not pode_falar_de_fralda:
+        return random.choice(LEGENDAS_FOTO_NEUTRAS)
+    if stage == "casados":
+        return random.choice(LEGENDAS_FOTO_ABDL_CASADOS)
+    if stage == "noivos":
+        return random.choice(LEGENDAS_FOTO_ABDL_NOIVOS)
+    # namorando com segredo já revelado: usa o tom mais leve, ainda sem "marido"
+    return random.choice(LEGENDAS_FOTO_ABDL_NOIVOS)
+
 async def send_spontaneous_message(application):
     for chat_id in list(user_chat_ids):
-        # 30% de chance de interação espontânea a cada ciclo
-        if random.random() < 0.3:
-            # Chance de mandar FOTO (15%) ou TEXTO+ÁUDIO (85%)
-            if random.random() < 0.15:
-                fotos = get_photos_list()
-                if fotos:
-                    legenda = random.choice([
-                        "Tô aqui de fraldinha pensando em você... ❤️",
-                        "Olha como seu marido tá hoje... 🥰",
-                        "Queria você aqui no meu colo agora... 😘",
-                        "Tô bem confortável aqui, só faltava você. ✨"
-                    ])
-                    if await send_photo(application.bot, chat_id, legenda):
-                        await send_human_voice(application.bot, chat_id, legenda)
-                        continue
-            
-            msg = random.choice([
-                "Acordei pensando em você, meu amor... ❤️",
-                "Tô com muita saudade do meu garoto! 🥰",
-                "Como você tá hoje, meu bem? Tá se cuidando? ✨",
-                "Só passei pra dizer que te amo muito. 😘",
-                "Hum... tava aqui lembrando do seu cheirinho. ❤️"
-            ])
-            try:
-                await application.bot.send_message(chat_id=chat_id, text=msg)
-                await send_human_voice(application.bot, chat_id, msg)
-            except:
-                pass
+        if ALLOWED_USER_IDS and chat_id not in ALLOWED_USER_IDS:
+            continue
+
+        if random.random() >= SPONTANEOUS_CHANCE:
+            continue
+
+        stage, _, secret_revealed = get_user_state(chat_id)
+        pode_falar_de_fralda = bool(secret_revealed) and stage in ("namorando", "noivos", "casados")
+
+        if random.random() < SPONTANEOUS_PHOTO_CHANCE:
+            fotos = get_photos_list()
+            if fotos:
+                legenda = escolher_legenda_foto(stage, secret_revealed)
+                if await send_photo(application.bot, chat_id, legenda):
+                    await send_human_voice(application.bot, chat_id, legenda)
+                    continue
+
+        msg = random.choice(MSGS_TEXTO_INTIMAS if pode_falar_de_fralda else MSGS_TEXTO_NEUTRAS)
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=msg)
+            await send_human_voice(application.bot, chat_id, msg)
+        except:
+            pass
 
 # 8. Handlers
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,9 +404,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_message(user_id, "user", user_text)
     
     # Palavras-chave para foto
+    stage_atual, _, secret_revelado_atual = get_user_state(user_id)
+    pode_falar_de_fralda_atual = bool(secret_revelado_atual) and stage_atual in ("namorando", "noivos", "casados")
+
+    palavras_fralda_molhada = ["molhad", "xixi", "fralda cheia", "fralda pesada", "usou a fralda"]
     palavras_foto = ["foto", "mostra", "ver você", "manda foto", "manda uma foto"]
+
+    if pode_falar_de_fralda_atual and any(p in user_text.lower() for p in palavras_fralda_molhada):
+        legenda = random.choice(LEGENDAS_FOTO_MOLHADA)
+        if await send_photo(context.bot, user_id, legenda):
+            await send_human_voice(context.bot, user_id, legenda)
+            return
+
     if any(p in user_text.lower() for p in palavras_foto):
-        legenda = random.choice(["Aqui estou eu, todo seu... ❤️", "Olha só como eu tô, meu bem. 🥰"])
+        legenda = escolher_legenda_foto(stage_atual, secret_revelado_atual)
         if await send_photo(context.bot, user_id, legenda):
             await send_human_voice(context.bot, user_id, legenda)
             return
