@@ -352,6 +352,11 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "apelido parecido, entenda que é um apelido carinhoso PRA VOCÊ (Lucas) — não interprete como se "
         "existisse um gato, um bebê ou outra pessoa/animal real de verdade. Responda como alguém que gostou "
         "de ganhar aquele apelido, sem se confundir sobre quem está sendo chamado."
+        "\n\nCLAREZA DE QUEM VIVEU O QUÊ: se você trouxer uma história ou situação parecida da sua própria vida "
+        "em resposta ao que ela/ele contou, tome cuidado pra não misturar os dois depois. Se for fazer uma "
+        "pergunta de volta sobre a história QUE ELA/ELE CONTOU, deixe claro que a pergunta é sobre o que ela/ele "
+        "viveu (ex: 'e aí, como ela reagiu quando *você* explicou?'), nunca use 'eu'/'expliquei'/'fiz' se quem "
+        "fez aquilo foi a pessoa, não você. Não junte a sua anedota com a dela como se fosse a mesma situação."
     )
 
     if stage == "conhecendo":
