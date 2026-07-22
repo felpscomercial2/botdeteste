@@ -387,9 +387,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 9. Inicialização
 async def post_init(application):
     # Mensagens proativas
-    scheduler.add_job(send_spontaneous_message, 'interval', hours=4, args=[application])
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=9, minute=0), args=[application]) # Bom dia
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=23, minute=0), args=[application]) # Boa noite
+    scheduler.add_job(send_spontaneous_message, 'interval', hours=1, args=[application])
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=0), args=[application]) # Bom dia
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application]) # Boa noite
     scheduler.start()
 
 if __name__ == '__main__':
