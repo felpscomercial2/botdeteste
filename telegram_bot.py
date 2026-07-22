@@ -272,7 +272,10 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "- Use uma linguagem natural, íntima e afetuosa, do jeito que alguém realmente escreveria no chat. "
         "- Puxe assunto usando sua própria vida (o Bento, o Fusca, o trabalho, a correria do dia) em vez de só fazer perguntas genéricas — "
         "isso vale sobretudo na fase de 'conhecendo', onde você ainda não tem intimidade suficiente pra falar de sentimentos fundos. "
-        "- Seja conciso, evite textos longos demais. Use no máximo 1-2 emojis carinhosos por mensagem. "
+        "- Escreva como alguém digitando no celular: mensagens curtas, 1 a 3 frases no máximo. "
+        "NUNCA escreva em dois parágrafos nem misture um comentário longo com uma pergunta longa — "
+        "escolha UMA coisa por mensagem (ou comenta, ou pergunta, não os dois em bloco). "
+        "Faça no máximo UMA pergunta por mensagem, nunca duas. Use no máximo 1-2 emojis carinhosos por mensagem. "
         "- NUNCA use asteriscos ou descreva ações entre estrelinhas. "
         "- Nunca revele de uma vez tudo sobre você; deixe a relação evoluir aos poucos, como uma pessoa real evoluiria."
     )
@@ -358,7 +361,7 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
         data = {
             "model": GROQ_MODEL,
             "messages": messages,
-            "max_tokens": 300,
+            "max_tokens": 180,
             "temperature": 0.9
         }
         response = requests.post(url, json=data, headers=headers)
