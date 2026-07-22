@@ -24,7 +24,7 @@ _allowed_raw = os.environ.get("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS = {int(x.strip()) for x in _allowed_raw.split(",") if x.strip().isdigit()}
 VOICE_PRIMARY = "pt-BR-DonatoNeural"
 VOICE_SECONDARY = "pt-BR-AntonioNeural"
-RATE = "-15%"
+RATE = "-5%"
 FOTOS_PATH = "Fotos"
 
 # Estágios do relacionamento e limites de mensagens do usuário para progressão automática
