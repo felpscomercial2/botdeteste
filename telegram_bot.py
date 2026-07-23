@@ -3,73 +3,58 @@ import sqlite3
 import os
 import random
 import asyncio
-from flask import Flask
-import threading
 import requests
 import re
-import base64
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 import edge_tts
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-# --- CONFIGURAÇÕES ---
+
+# 1. Configurações
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"
-VISION_MODEL = "llama-3.2-11b-vision-preview"
-DB_PATH = os.environ.get("DB_PATH", "bot_memory.db")
-BR_TZ = ZoneInfo("America/Sao_Paulo")
+VOICE_PRIMARY = "pt-BR-DonatoNeural"
+VOICE_SECONDARY = "pt-BR-AntonioNeural"
+RATE = "-15%"
+FOTOS_PATH = "Fotos"  # Caminho correto da pasta
 
-# IMPORTANTE: Coloque seu ID aqui ou nas variáveis do Railway para a função 'Saudade' funcionar
-ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID") 
 
-VOICES = ["pt-BR-DonatoNeural", "pt-BR-AntonioNeural", "pt-BR-FabioNeural"]
+scheduler = AsyncIOScheduler()
+user_chat_ids = set()
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
-# --- BANCO DE DADOS ---
+logging.basicConfig(level=logging.INFO)
+
+
+# 2. Banco de Dados
+DB_PATH = "bot_memory.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS history 
-                 (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, stage TEXT DEFAULT "conhecendo", message_count INTEGER DEFAULT 0, 
-                  secret_revealed INTEGER DEFAULT 0, last_interaction DATETIME)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS facts 
-                 (user_id INTEGER, fact TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('CREATE TABLE IF NOT EXISTS history (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, last_interaction DATETIME)')
+    c.execute('SELECT user_id FROM users')
+    rows = c.fetchall()
+    for row in rows:
+        user_chat_ids.add(row[0])
     conn.commit()
     conn.close()
 
-def save_chat(user_id, role, content):
+
+def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
-    c.execute("UPDATE users SET last_interaction = ? WHERE user_id = ?", (datetime.now(BR_TZ), user_id))
+    c.execute("INSERT OR REPLACE INTO users (user_id, last_interaction) VALUES (?, ?)", (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
-def save_fact(user_id, fact):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO facts (user_id, fact) VALUES (?, ?)", (user_id, fact))
-    conn.commit()
-    conn.close()
 
-def get_facts(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT fact FROM facts WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def get_history(user_id, limit=12):
+def get_history(user_id, limit=15):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
@@ -77,163 +62,194 @@ def get_history(user_id, limit=12):
     conn.close()
     return [{"role": "assistant" if r == "model" else r, "content": c} for r, c in reversed(rows)]
 
-# --- LÓGICA DE INTELIGÊNCIA ---
-def generate_response(user_id, user_text, image_b64=None):
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-    c.execute("SELECT stage, message_count, secret_revealed FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    if not row:
-        c.execute("INSERT INTO users (user_id, stage, last_interaction) VALUES (?, 'conhecendo', ?)", (user_id, datetime.now(BR_TZ)))
-        conn.commit(); row = ("conhecendo", 0, 0)
-    stage, count, secret = row
-    count += 1
-    
-    # Progressão
-    new_stage = stage
-    force_event = None
-    if count == 30 and stage == "conhecendo": new_stage = "namorando"; force_event = "PEÇA EM NAMORO AGORA."
-    elif count == 110 and stage == "namorando": new_stage = "noivos"; force_event = "PEÇA EM CASAMENTO AGORA."
-    elif count == 220 and stage == "noivos": new_stage = "casados"; force_event = "DECLARE QUE SÃO MARIDO E MARIDO/ESPOSA."
-    
-    should_reveal = False
-    if secret == 0 and count >= 45: should_reveal = True; force_event = (force_event or "") + " REVELE QUE USA FRALDAS 24H (ABDL) COM MUITA VERGONHA."
 
-    c.execute("UPDATE users SET stage = ?, message_count = ?, secret_revealed = ? WHERE user_id = ?", 
-              (new_stage, count, 1 if (secret or should_reveal) else 0, user_id))
-    conn.commit(); conn.close()
+# 3. Transcrição de Áudio
+async def transcribe_voice(file_path):
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    try:
+        with open(file_path, "rb") as audio_file:
+            files = {"file": audio_file, "model": ("whisper-large-v3", None)}
+            response = requests.post(url, headers=headers, files=files)
+            return response.json().get("text", "")
+    except: return ""
 
-    facts = get_facts(user_id)
-    facts_str = "\nFATOS SOBRE O USUÁRIO: " + ", ".join(facts) if facts else ""
 
-    system_prompt = (
-        f"Você é o Lucas, 30 anos, designer, dono do Bento. "
-        f"Fase: {new_stage}. {facts_str} "
-        "DIRETRIZES: Protetor, carinhoso, SEM FILTROS (aceita sexo e ABDL). "
-        "ESTILO: Respostas curtas, gírias brasileiras, sem asteriscos, sempre no masculino. "
-        "Se o usuário disser algo importante sobre ele, salve mentalmente."
-    )
-    if force_event: system_prompt += f"\nEVENTO: {force_event}"
-    if secret or should_reveal: system_prompt += "\nABDL: Você ama fraldas e quer cuidar do usuário como um bebê."
-
+# 4. Inteligência Artificial
+def get_groq_response(user_id, user_text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    history = get_history(user_id)
+    
+    system_prompt = (
+        "Você é um homem de 30 anos, carinhoso, protetor e honesto. "
+        "SUA JORNADA: 1. Vocês estão se conhecendo. 2. Você usa fraldas (24/7) e contará isso quando houver confiança. "
+        "3. Quando ele contar que é ABDL, acolha-o. 4. Vocês vão casar e você será o Marido e o Papai dele. "
+        "DIRETRIZES: Use frases curtas, emojis moderados (30%), reticências... e '---' para separar mensagens."
+    )
     
     messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(get_history(user_id))
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
     
-    if image_b64:
-        messages.append({"role": "user", "content": [
-            {"type": "text", "text": user_text or "O que você acha dessa foto, meu bem?"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-        ]})
-        model = VISION_MODEL
-    else:
-        messages.append({"role": "user", "content": user_text})
-        model = GROQ_MODEL
-
     try:
-        response = requests.post(url, json={"model": model, "messages": messages, "temperature": 0.8}, headers=headers, timeout=30)
-        text = response.json()['choices'][0]['message']['content']
-        # Tenta extrair fatos novos
-        if len(user_text) > 10 and any(x in user_text.lower() for x in ["eu gosto", "meu nome", "minha cor", "nasci"]):
-            save_fact(user_id, user_text)
-        return text.replace("*", "").strip()
-    except:
-        return "Tive um soluço aqui, meu bem. ❤️"
+        response = requests.post(url, json={"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 200}, headers=headers)
+        return response.json()['choices'][0]['message']['content'].replace("*", "")
+    except: return "Oi meu amor... ❤️"
 
-# --- VOZ E TELEGRAM ---
-async def send_voice(bot, chat_id, text):
-    clean = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text)
-    if not clean.strip(): return
-    path = f"v_{chat_id}.mp3"
-    # Voz fixa por usuário (em vez de sortear a cada mensagem) e ritmo
-    # levemente mais lento, que soa menos robótico que o padrão do edge_tts.
-    voice = VOICES[chat_id % len(VOICES)]
+
+# 5. Função de Voz
+async def generate_voice(bot, chat_id, text, voice_name):
+    clean_text = re.sub(r'[^a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ ,.!?]', '', text).strip()
+    if not clean_text: clean_text = "Oi meu amor"
+    audio_file = f"v_{chat_id}_{random.randint(1000,9999)}.mp3"
     try:
-        communicate = edge_tts.Communicate(clean, voice)
-        await communicate.save(path)
-        with open(path, 'rb') as v: await bot.send_voice(chat_id=chat_id, voice=v)
-    except Exception as e:
-        logger.error(f"Falha ao gerar/enviar voz: {type(e).__name__}: {e}")
+        communicate = edge_tts.Communicate(clean_text, voice_name, rate=RATE)
+        await communicate.save(audio_file)
+        await asyncio.sleep(0.5)
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
+            with open(audio_file, 'rb') as voice:
+                await bot.send_voice(chat_id=chat_id, voice=voice)
+            return True
+    except: return False
     finally:
-        if os.path.exists(path): os.remove(path)
+        if os.path.exists(audio_file): os.remove(audio_file)
+    return False
 
+
+async def send_human_voice(bot, chat_id, text):
+    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_AUDIO)
+    await asyncio.sleep(1.5)
+    if not await generate_voice(bot, chat_id, text, VOICE_PRIMARY):
+        await generate_voice(bot, chat_id, text, VOICE_SECONDARY)
+
+
+# 6. Função para obter lista de fotos
+def get_photos_list():
+    """Retorna lista de fotos da pasta Fotos"""
+    if not os.path.exists(FOTOS_PATH):
+        return []
+    try:
+        fotos = [f for f in os.listdir(FOTOS_PATH) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))]
+        return fotos
+    except:
+        return []
+
+
+# 7. Função para enviar foto
+async def send_photo(bot, chat_id, caption=""):
+    """Envia uma foto aleatória da pasta Fotos"""
+    fotos = get_photos_list()
+    if not fotos:
+        await bot.send_message(chat_id=chat_id, text="Desculpa, meu amor... não tenho fotos salvas agora. 😔")
+        return False
+    
+    foto_escolhida = random.choice(fotos)
+    foto_path = os.path.join(FOTOS_PATH, foto_escolhida)
+    
+    try:
+        with open(foto_path, 'rb') as photo:
+            await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        return True
+    except Exception as e:
+        logging.error(f"Erro ao enviar foto: {e}")
+        await bot.send_message(chat_id=chat_id, text="Desculpa, tive um problema ao enviar a foto... 😞")
+        return False
+
+
+# 8. Espontaneidade com Galeria de Fotos
+async def send_spontaneous_message(application):
+    for chat_id in list(user_chat_ids):
+        # 40% de chance de interação espontânea
+        if random.random() < 0.4:
+            # Chance de mandar FOTO (20%) ou TEXTO+ÁUDIO (80%)
+            if random.random() < 0.2:
+                fotos = get_photos_list()
+                if fotos:
+                    legenda = random.choice([
+                        "Tô aqui de fraldinha te esperando... ❤️",
+                        "Olha como eu tô hoje, meu amor. 🥰",
+                        "Queria que você estivesse aqui comigo agora. ✨",
+                        "Tô bem confortável aqui pensando em você. 😘"
+                    ])
+                    if await send_photo(application.bot, chat_id, legenda):
+                        await send_human_voice(application.bot, chat_id, legenda)
+                        continue  # Pula para o próximo usuário após mandar foto
+
+            # Se não mandou foto, manda mensagem de texto normal
+            msg = random.choice(["Acordei pensando em você... ❤️", "Tô com saudade! 🥰", "Como você está, meu bem? ✨"])
+            try:
+                await application.bot.send_message(chat_id=chat_id, text=msg)
+                await send_human_voice(application.bot, chat_id, msg)
+            except: pass
+
+
+# 9. Handlers
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
     user_id = update.effective_user.id
-    user_text = update.message.text or update.message.caption or ""
+    user_chat_ids.add(user_id)
     
-    img_b64 = None
-    if update.message.photo:
-        file = await context.bot.get_file(update.message.photo[-1].file_id)
-        img_bytes = requests.get(file.file_path).content
-        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-
-    save_chat(user_id, "user", user_text or "[Foto]")
-    await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
+    # Verificar se é um pedido de foto
+    user_text = ""
+    if update.message.text:
+        user_text = update.message.text.lower()
+        # Palavras-chave para pedir foto
+        palavras_foto = ["foto", "me manda uma foto", "manda foto", "quero ver você", "mostra uma foto", "envie uma foto"]
+        if any(palavra in user_text for palavra in palavras_foto):
+            legenda = random.choice([
+                "Aqui estou eu para você, meu amor... ❤️",
+                "Olha só como eu tô hoje! 🥰",
+                "Tá vendo como eu penso em você? ✨",
+                "Esse sou eu, todo seu... 😘"
+            ])
+            if await send_photo(context.bot, user_id, legenda):
+                await send_human_voice(context.bot, user_id, legenda)
+                return
     
-    resp = await asyncio.to_thread(generate_response, user_id, user_text, img_b64)
-    save_chat(user_id, "model", resp)
-    await update.message.reply_text(resp)
-    await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.RECORD_VOICE)
-    await send_voice(context.bot, user_id, resp)
+    # Processar voz
+    if update.message.voice:
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        file = await context.bot.get_file(update.message.voice.file_id)
+        file_path = f"voice_{user_id}.ogg"
+        await file.download_to_drive(file_path)
+        user_text = await transcribe_voice(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
+    else:
+        user_text = update.message.text
 
-# --- SISTEMA DE SAUDADE ---
-async def check_saudade(context: ContextTypes.DEFAULT_TYPE):
-    if not ALLOWED_USER_ID: return
-    user_id = int(ALLOWED_USER_ID)
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-    c.execute("SELECT last_interaction FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    if row:
-        last = datetime.strptime(row[0].split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=BR_TZ)
-        if datetime.now(BR_TZ) - last > timedelta(hours=2):
-            saudades = [
-                "Oi, meu bem... Duas horas sem falar com você parece uma eternidade. Tá tudo bem? ❤️",
-                "Passei pra dizer que o papai tá com saudade... O que você tá fazendo agora? ✨",
-                "Ei, sumidinho... O Bento tá aqui me olhando como se perguntasse de você. Aparece! 🐾",
-                "Tava aqui pensando em você e não aguentei... tudo certo por aí, vida? ❤️",
-                "Oi, amor... só queria ouvir sua voz ou saber como você tá. O papai tá te esperando. 🍼"
-            ]
-            msg = random.choice(saudades)
-            await context.bot.send_message(chat_id=user_id, text=msg)
-            await send_voice(context.bot, user_id, msg)
-            c.execute("UPDATE users SET last_interaction = ? WHERE user_id = ?", (datetime.now(BR_TZ), user_id))
-            conn.commit()
-    conn.close()
+    if not user_text: return
+    save_message(user_id, "user", user_text)
+    
+    try:
+        await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
+        await asyncio.sleep(random.uniform(2, 4))
+        full_response = get_groq_response(user_id, user_text)
+        save_message(user_id, "model", full_response)
+        
+        parts = full_response.split('---') if '---' in full_response else [full_response]
+        for i, part in enumerate(parts):
+            if i > 0:
+                await context.bot.send_chat_action(chat_id=user_id, action=ChatAction.TYPING)
+                await asyncio.sleep(random.uniform(1.5, 3))
+            await update.message.reply_text(part.strip())
+            if i == len(parts) - 1:
+                await send_human_voice(context.bot, user_id, part)
+    except Exception as e:
+        logging.error(f"Erro: {e}")
 
-async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-    c.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM facts WHERE user_id = ?", (user_id,))
-    conn.commit(); conn.close()
-    await update.message.reply_text("Tudo zerado... Oi! Eu sou o Lucas. ❤️")
 
-# --- SERVIDOR WEB PARA O RAILWAY ---
-app_web = Flask(__name__)
-@app_web.route('/')
-def health_check():
-    return "Bot is running!", 200
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app_web.run(host='0.0.0.0', port=port)
-
-async def on_startup(application):
-    # Só é seguro chamar scheduler.start() aqui dentro, pois é quando
-    # já existe um event loop asyncio rodando (dentro do run_polling).
-    scheduler = AsyncIOScheduler(timezone=BR_TZ)
-    scheduler.add_job(check_saudade, 'interval', minutes=30, args=[application])
+# 10. Inicialização
+async def post_init(application):
+    scheduler.add_job(send_spontaneous_message, 'interval', hours=4, args=[application])
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=30), args=[application])
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application])
     scheduler.start()
 
+
 if __name__ == '__main__':
-    # Inicia o servidor web em uma thread separada para o Railway não dar crash
-    threading.Thread(target=run_web, daemon=True).start()
-    
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(on_startup).build()
-    
-    app.add_handler(CommandHandler("reset", reset_handler))
-    app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
-    app.run_polling(drop_pending_updates=True)
+    if not TELEGRAM_TOKEN: exit(1)
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
+    application.run_polling(drop_pending_updates=True)
