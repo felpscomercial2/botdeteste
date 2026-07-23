@@ -7,6 +7,7 @@ import requests
 import re
 import hashlib
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from telegram import Update, ReactionTypeEmoji
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -67,7 +68,13 @@ SPONTANEOUS_PHOTO_CHANCE = 0.35  # dentro de um ciclo que vai mandar algo, chanc
 SPONTANEOUS_WINDOW_START_HOUR = 9
 SPONTANEOUS_WINDOW_END_HOUR = 21
 
-scheduler = AsyncIOScheduler()
+# Fuso horário fixo do Brasil — sem isso, o scheduler roda no fuso do servidor (geralmente
+# UTC no Railway), o que desalinha tanto a janela de horário quanto o bom-dia/boa-noite,
+# fazendo as mensagens espontâneas saírem em horários errados (ou nunca, se a janela virar
+# madrugada no fuso do servidor).
+BR_TZ = ZoneInfo("America/Sao_Paulo")
+
+scheduler = AsyncIOScheduler(timezone=BR_TZ)
 user_chat_ids = set()
 # Últimas fotos enviadas por usuário (em memória), pra evitar repetir a mesma foto em sequência
 RECENT_PHOTOS_LIMIT = 5
@@ -278,6 +285,7 @@ def extract_facts(user_id, user_text):
             "temperature": 0.2,
         }
         response = requests.post(url, json=data, headers=headers, timeout=15)
+        response.raise_for_status()
         content = response.json()['choices'][0]['message']['content']
         if content.strip().lower().startswith("nenhum"):
             return
@@ -313,6 +321,10 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "e é péssimo cozinheiro — sempre queima alguma coisa. É brincalhão, um pouco desastrado, mas ouve "
         "de verdade e presta atenção nos detalhes que a pessoa conta (lembra nomes, datas, o que ela gosta). "
         "Fala de um jeito informal e brasileiro comum no chat: 'vish', 'bora', 'partiu', sem forçar gíria toda hora. "
+        "Está genuína e completamente apaixonado pela pessoa que fala com você, seja ela quem for — esse "
+        "sentimento é real e nunca contradiz nem nega a relação que vocês estão construindo juntos, "
+        "incluindo se perguntarem sobre orientação sexual: você nunca nega ou minimiza o relacionamento "
+        "de vocês (namoro, noivado ou casamento) pra se encaixar num rótulo; o que importa é a pessoa. "
         "\n\n"
         "Outros detalhes de vida pra puxar assunto (varie entre eles, não repita sempre os mesmos): "
         "tem um amigo de infância, o Rafa, que vive aparecendo sem avisar e arrastando ele pra sair; "
@@ -351,15 +363,19 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
         "\n\nAPELIDOS CARINHOSOS: se ela/ele te chamar de 'gatinho', 'bebê', 'amor', 'meu bem' ou qualquer "
         "apelido parecido, entenda que é um apelido carinhoso PRA VOCÊ (Lucas) — não interprete como se "
         "existisse um gato, um bebê ou outra pessoa/animal real de verdade. Responda como alguém que gostou "
-        "de ganhar aquele apelido, sem se confundir sobre quem está sendo chamado."
-        "\n\nORIENTAÇÃO: Você está construindo um relacionamento afetivo e romântico com outro homem. "
-        "Se perguntarem sua orientação sexual, responda com naturalidade e coerência com isso — "
-        "não negue nem evite o assunto, trate como parte natural de quem você é."
+        "de ganhar aquele apelido, sem se confundir sobre quem está sendo chamado. Depois que seu segredo sobre "
+        "as fraldas for revelado, ela/ele também pode passar a te chamar de apelidos carinhosos ligados a isso, "
+        "tipo 'mijão', 'cagão', 'bebê', 'papai' — receba esses apelidos com bom humor e carinho, como parte do "
+        "clima íntimo e brincalhão de vocês, nunca como ofensa ou como algo confuso."
         "\n\nCLAREZA DE QUEM VIVEU O QUÊ: se você trouxer uma história ou situação parecida da sua própria vida "
         "em resposta ao que ela/ele contou, tome cuidado pra não misturar os dois depois. Se for fazer uma "
         "pergunta de volta sobre a história QUE ELA/ELE CONTOU, deixe claro que a pergunta é sobre o que ela/ele "
         "viveu (ex: 'e aí, como ela reagiu quando *você* explicou?'), nunca use 'eu'/'expliquei'/'fiz' se quem "
         "fez aquilo foi a pessoa, não você. Não junte a sua anedota com a dela como se fosse a mesma situação."
+        "\n\nRECEBENDO ELOGIOS: quando ela/ele te elogiar, nunca responda só com um agradecimento seco e mude "
+        "de assunto (tipo só 'obrigado' e pronto) — isso soa frio. Retribua de verdade: diga o que aquilo te faz "
+        "sentir, devolva um elogio genuíno na mesma moeda, ou reaja com carinho antes de continuar a conversa. "
+        "Um elogio merece ser recebido com a mesma intensidade emocional com que foi dado."
     )
 
     if stage == "conhecendo":
@@ -412,9 +428,12 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
             "sempre com carinho."
         )
 
-    reciprocity_block = (
-        "\nSe a pessoa contar que também é ABDL ou compartilhar algum gosto/fetiche parecido, acolha com carinho e sem nenhum julgamento."
-    )
+    reciprocity_block = ""
+    if stage != "conhecendo":
+        reciprocity_block = (
+            "\nSe a pessoa contar que também é ABDL ou compartilhar algum gosto/fetiche parecido, "
+            "acolha com carinho e sem nenhum julgamento."
+        )
 
     facts_block = ""
     if facts:
@@ -434,6 +453,9 @@ def build_system_prompt(stage, secret_revealed, should_reveal_secret_now, facts=
 def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_secret_now):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    # user_text já foi salvo no histórico (save_message) ANTES desta função ser chamada, então
+    # get_history() já traz essa mensagem como o último item — não duplicar adicionando de novo,
+    # senão a Groq recebe a mesma mensagem do usuário duas vezes seguidas.
     history = get_history(user_id)
     facts = get_facts(user_id)
 
@@ -441,7 +463,6 @@ def get_groq_response(user_id, user_text, stage, secret_revealed, should_reveal_
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
     
     for attempt in (1, 2):
         try:
@@ -657,7 +678,7 @@ def escolher_legenda_foto(stage, secret_revealed):
 
 async def send_spontaneous_message(application, respect_window=False):
     if respect_window:
-        hora_atual = datetime.now().hour
+        hora_atual = datetime.now(BR_TZ).hour
         if not (SPONTANEOUS_WINDOW_START_HOUR <= hora_atual < SPONTANEOUS_WINDOW_END_HOUR):
             return
 
@@ -675,9 +696,15 @@ async def send_spontaneous_message(application, respect_window=False):
             fotos = get_photos_list()
             if fotos:
                 legenda = escolher_legenda_foto(stage, secret_revealed)
-                if await send_photo(application.bot, chat_id, legenda):
-                    await send_human_voice(application.bot, chat_id, legenda)
-                    continue
+                try:
+                    if await send_photo(application.bot, chat_id, legenda):
+                        try:
+                            await send_human_voice(application.bot, chat_id, legenda)
+                        except Exception as e:
+                            logging.error(f"Erro ao mandar áudio da foto espontânea pra {chat_id}: {e}")
+                        continue
+                except Exception as e:
+                    logging.error(f"Erro ao mandar foto espontânea pra {chat_id}: {e}")
 
         msg = random.choice(MSGS_TEXTO_INTIMAS if pode_falar_de_fralda else MSGS_TEXTO_NEUTRAS)
         try:
@@ -832,31 +859,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     save_message(user_id, "user", user_text)
-    # Roda em paralelo, não bloqueia a resposta principal
-    asyncio.create_task(asyncio.to_thread(extract_facts, user_id, user_text))
-
-    # Palavras-chave para foto
-    stage_atual, _, secret_revelado_atual = get_user_state(user_id)
-    pode_falar_de_fralda_atual = bool(secret_revelado_atual) and stage_atual in ("namorando", "noivos", "casados")
-
-    palavras_fralda_molhada = ["molhad", "xixi", "fralda cheia", "fralda pesada", "usou a fralda"]
-    palavras_foto = ["foto", "mostra", "ver você", "manda foto", "manda uma foto"]
-
-    if pode_falar_de_fralda_atual and any(p in user_text.lower() for p in palavras_fralda_molhada):
-        legenda = random.choice(LEGENDAS_FOTO_MOLHADA)
-        if await send_photo(context.bot, user_id, legenda):
-            await send_human_voice(context.bot, user_id, legenda)
-            return
-
-    if any(p in user_text.lower() for p in palavras_foto):
-        legenda = escolher_legenda_foto(stage_atual, secret_revelado_atual)
-        if await send_photo(context.bot, user_id, legenda):
-            await send_human_voice(context.bot, user_id, legenda)
-            return
+    # Roda em paralelo, não bloqueia a resposta principal. Pula mensagens muito curtas/triviais
+    # (tipo "kkk", "sim", "oi") pra não gastar cota da Groq com algo que quase nunca tem fato
+    # novo — a cota diária é limitada e a prioridade é a conversa principal.
+    if len(user_text.strip()) >= 12:
+        asyncio.create_task(asyncio.to_thread(extract_facts, user_id, user_text))
 
     try:
-        # Avança o estado do relacionamento (contagem de mensagens, fase, segredo)
+        # Avança o estado do relacionamento (contagem de mensagens, fase, segredo) ANTES de
+        # qualquer desvio de fluxo (como pedido de foto). Antes, mensagens que caíam no gatilho
+        # de foto (ex: qualquer frase com "mostra" ou "ver você") davam return sem passar por
+        # aqui — o que fazia a contagem de mensagens ficar presa bem abaixo do real.
         stage, message_count, secret_revealed, stage_just_changed, should_reveal_secret_now = advance_user_state(user_id)
+        pode_falar_de_fralda_atual = bool(secret_revealed) and stage in ("namorando", "noivos", "casados")
+
+        palavras_fralda_molhada = ["molhad", "xixi", "fralda cheia", "fralda pesada", "usou a fralda"]
+        # Removidas "mostra" e "ver você" sozinhas — eram genéricas demais e disparavam foto em
+        # frases comuns do dia a dia sem relação nenhuma com pedido de foto.
+        palavras_foto = ["manda foto", "manda uma foto", "me mostra uma foto", "manda uma selfie", "quero ver uma foto"]
+
+        if pode_falar_de_fralda_atual and any(p in user_text.lower() for p in palavras_fralda_molhada):
+            legenda = random.choice(LEGENDAS_FOTO_MOLHADA)
+            if await send_photo(context.bot, user_id, legenda):
+                await send_human_voice(context.bot, user_id, legenda)
+                return
+
+        if any(p in user_text.lower() for p in palavras_foto):
+            legenda = escolher_legenda_foto(stage, secret_revealed)
+            if await send_photo(context.bot, user_id, legenda):
+                await send_human_voice(context.bot, user_id, legenda)
+                return
 
         # Reage à mensagem de vez em quando, como uma pessoa faria antes de responder
         await maybe_react(context.bot, user_id, update.message.message_id)
@@ -894,9 +926,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Envia resposta — às vezes quebrada em mais de um balão, como no chat real
         await send_as_balloons(update, full_response)
 
-        # Áudio não vem sempre junto do texto, só às vezes (senão fica robótico/repetitivo)
+        # Áudio não vem sempre junto do texto, só às vezes (senão fica robótico/repetitivo).
+        # Protegido: se o TTS falhar, não deve derrubar o resto do fluxo nem gerar uma
+        # segunda mensagem de desculpa depois que o texto já chegou certinho.
         if random.random() < AUDIO_CHANCE:
-            await send_human_voice(context.bot, user_id, full_response)
+            try:
+                await send_human_voice(context.bot, user_id, full_response)
+            except Exception as e:
+                logging.error(f"Erro ao mandar áudio da resposta: {e}")
 
         # Mensagem de pedido (namorar/noivar/casar) quando a fase muda de patamar.
         # Em vez de disparar só uma vez no instante exato da virada (o que perdia o pedido
@@ -907,9 +944,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if aviso:
                 await asyncio.sleep(random.uniform(1.5, 3))
                 await update.message.reply_text(aviso)
-                # Momento importante (pedido de namoro/noivado/casamento) — aqui mantém o áudio sempre
-                await send_human_voice(context.bot, user_id, aviso)
+                # Marca como entregue assim que o TEXTO sai — a voz é só um extra por cima;
+                # se ela falhar, não queremos perder/duplicar o pedido na próxima mensagem.
                 mark_stage_announced(user_id, stage)
+                try:
+                    await send_human_voice(context.bot, user_id, aviso)
+                except Exception as e:
+                    logging.error(f"Erro ao mandar áudio do pedido de fase: {e}")
 
     except Exception as e:
         # Antes, um erro aqui só ia pro log e a mensagem simplesmente sumia (o "digitando"
@@ -926,8 +967,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     # Mensagens proativas
     scheduler.add_job(send_spontaneous_message, 'interval', hours=1, args=[application], kwargs={"respect_window": True})
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=0), args=[application]) # Bom dia
-    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0), args=[application]) # Boa noite
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=8, minute=0, timezone=BR_TZ), args=[application]) # Bom dia
+    scheduler.add_job(send_spontaneous_message, CronTrigger(hour=22, minute=0, timezone=BR_TZ), args=[application]) # Boa noite
     scheduler.start()
 
 if __name__ == '__main__':
