@@ -1,5 +1,4 @@
-python-telegram-bot
-requests
-edge-tts
-apscheduler
-flask
+python-telegram-bot>=20.0
+httpx>=0.24.0
+edge-tts>=6.1.0
+apscheduler>=3.10.0
