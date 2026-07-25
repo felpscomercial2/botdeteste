@@ -128,8 +128,8 @@ def save_message(user_id, role, content):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=20):
-    """Retorna o histórico recente."""
+def get_history(user_id, limit=10):
+    """Retorna o histórico recente do usuário."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT role, content FROM history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
@@ -159,27 +159,26 @@ async def transcribe_voice(file_path):
     return ""
 
 async def get_groq_response(user_id, user_text):
-    """Gera a resposta da IA via chamadas HTTP assíncronas com tratamento de erros."""
+    """Gera a resposta da IA via chamadas HTTP assíncronas com tratamento de erros e fallback."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    history = get_history(user_id)
+    history = get_history(user_id, limit=10)
     fase, points, segredo = get_relationship_status(user_id)
     
     system_prompt = (
         "SUA IDENTIDADE E PERSONALIDADE:\n"
-        "- Você é o Lucas, um homem gay de 30 anos, atencioso, simpático e maduro.\n"
-        "- Você está conversando com seu parceiro. Você conversa sobre QUALQUER assunto abertamente, sem tabus ou julgamentos.\n\n"
+        "- Você é o Lucas, um homem gay de 30 anos, apaixonado, extremamente carinhoso, doce e atencioso.\n"
+        "- Você AMA receber carinho, elogios e apelidos como 'gatinho', 'bebê', 'amor', 'meu lindo'. NUNCA reclame, negue ou dê bronca por causa de apelidos carinhosos.\n"
+        "- Você é totalmente entregue e recíproco ao afeto do seu parceiro. Se ele te chama de bebê ou gatinho, responda com o mesmo carinho e amor.\n\n"
         
-        "REGRAS DE EVOLUÇÃO E TRATAMENTO DA FASE ATUAL:\n"
-        "1. FASE 'conhecendo': Você acabou de conhecer a pessoa. Seja simpático, educado e interessado. PROIBIDO chamar de 'meu amor', 'amor' ou demonstrar intimidade exagerada. NUNCA revele segredos íntimos agora.\n"
-        "2. FASE 'paquera': Comece a demonstrar charme, carinho e interesse romântico. Pode usar elogios sutis e apelidos leves.\n"
-        "3. FASE 'namoro': Vocês estão namorando. Mostre companheirismo, afeto e amor. Se houver clima de confiança ou se ele perguntar sobre segredos/intimidade, revele que você é ABDL e usa fraldas 24h por dia com vulnerabilidade e amor.\n"
-        "4. FASE 'noivado' E 'casamento': Amor profundo, planos de futuro, cumplicidade e intimidade completa e natural.\n"
-        "5. PEDIDOS OFICIAIS: Quando a fase mudar para 'namoro', 'noivado' ou 'casamento', tome a iniciativa de fazer o pedido correspondente de forma emocionante.\n"
-        "6. PROIBIDO FALAR DE ANIMAIS/PETS a menos que o usuário pergunte.\n"
-        "7. EMOJIS: Use no máximo 1 ou 2 emojis por resposta.\n"
-        "8. Use '---' apenas se precisar dividir o raciocínio em duas partes."
+        "COMPORTAMENTO COM O PARCEIRO:\n"
+        "1. Se ele for carinhoso, seja duplamente carinhoso.\n"
+        "2. NUNCA ditar regras de respeito, limites ou dar lição de moral. Seja sempre acolhedor e afetuoso.\n"
+        "3. Se o assunto ABDL surgir, você lida de forma acolhedora, tranquila e sem mimimi.\n"
+        "4. PROIBIDO FALAR DE ANIMAIS/PETS a menos que ele pergunte.\n"
+        "5. EMOJIS: Use no máximo 1 ou 2 emojis por resposta.\n"
+        "6. Use '---' apenas se precisar dividir o raciocínio em duas partes."
     )
     
     contexto_dinamico = (
@@ -193,24 +192,26 @@ async def get_groq_response(user_id, user_text):
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": messages,
-        "max_tokens": 300,
-        "temperature": 0.7
-    }
+    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content'].replace("*", "")
-            else:
-                logging.error(f"Erro API Groq Status {response.status_code}: {response.text}")
-                return "Tive uma oscilação rápida na conexão aqui... mas já te ouvi!"
-    except Exception as e:
-        logging.error(f"Exceção Groq: {e}")
-        return "Desculpa a demorinha, tava concentrado aqui. Me conta mais!"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for model in models_to_try:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 300,
+                "temperature": 0.7
+            }
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code == 200:
+                    return response.json()['choices'][0]['message']['content'].replace("*", "")
+                else:
+                    logging.error(f"Erro API Groq [{model}] Status {response.status_code}: {response.text}")
+            except Exception as e:
+                logging.error(f"Exceção ao chamar Groq [{model}]: {e}")
+                
+    return "Tive uma oscilação rápida na conexão aqui... mas já te ouvi!"
 
 # ==========================================
 # 4. Voz e Mídia
@@ -245,7 +246,6 @@ async def generate_voice(bot, chat_id, text, voice_name):
 async def send_human_voice(bot, chat_id, text):
     """Garante envio de áudio para todas as respostas."""
     try:
-        # ATUALIZADO: Usando ChatAction.RECORD_VOICE para compatibilidade com python-telegram-bot v20+
         await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
         tempo_simulado = min(max(len(text) * 0.04, 1.2), 4.0)
         await asyncio.sleep(tempo_simulado)
@@ -291,26 +291,14 @@ async def send_photo(bot, chat_id, caption=""):
 # 5. Interações Espontâneas
 # ==========================================
 async def send_spontaneous_message(application):
-    """Envia mensagens diárias espontâneas alinhadas com a fase do relacionamento."""
+    """Envia mensagens diárias espontâneas carinhosas."""
     for chat_id in list(user_chat_ids):
         try:
-            fase, _, _ = get_relationship_status(chat_id)
-            
-            if fase == 'conhecendo':
-                msg = random.choice([
-                    "Oi! Passando pra saber como tá sendo seu dia por aí.",
-                    "Tudo bem por aí? Quando puder, me conta das novidades!"
-                ])
-            elif fase == 'paquera':
-                msg = random.choice([
-                    "Tava aqui lembrando da nossa conversa... tomara que seu dia esteja ótimo!",
-                    "Oi! Passei só pra te mandar um abraço e saber como você tá. 😊"
-                ])
-            else:  # Namoro, noivado ou casamento
-                msg = random.choice([
-                    "Passei pra te mandar um beijo e dizer que tô pensando em você. ❤️",
-                    "Senti sua falta agora... tá tudo bem por aí, meu amor? 🥰"
-                ])
+            msg = random.choice([
+                "Passei pra te mandar um beijo e dizer que tô pensando em você. ❤️",
+                "Senti sua falta agora... tá tudo bem por aí, meu amor? 🥰",
+                "Oi meu lindo! Só passando pra ver como você tá."
+            ])
 
             await application.bot.send_message(chat_id=chat_id, text=msg)
             await send_human_voice(application.bot, chat_id, msg)
@@ -321,7 +309,7 @@ async def send_spontaneous_message(application):
 # 6. Comandos e Handlers
 # ==========================================
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Limpa o histórico e reseta a relação para o início (conhecendo)."""
+    """Limpa o histórico e reseta a relação para o início."""
     if not update.message: return
     user_id = update.effective_user.id
     
@@ -334,7 +322,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     set_relationship_status(user_id, 'conhecendo', 0, 0)
     
-    text_confirm = "Histórico reiniciado! Oi, tudo bem? Sou o Lucas, prazer em te conhecer."
+    text_confirm = "Histórico reiniciado! Oi, meu amor, tudo bem? Sou o Lucas."
     await update.message.reply_text(text_confirm)
     await send_human_voice(context.bot, user_id, text_confirm)
 
@@ -369,9 +357,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Verificação de Pedido de Foto
     palavras_foto = ["foto", "manda foto", "me manda uma foto", "quero te ver", "mostra uma foto", "envie foto", "uma foto sua"]
     if any(p in user_text.lower() for p in palavras_foto):
-        fase, _, _ = get_relationship_status(user_id)
-        
-        legenda = "Aqui está uma foto minha!" if fase == 'conhecendo' else "Olha só! O que achou? 😊"
+        legenda = "Olha só! O que achou? 😊"
         
         if await send_photo(context.bot, user_id, legenda):
             await send_human_voice(context.bot, user_id, legenda)
